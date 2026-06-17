@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m py_compile poster.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import json; json.load\\(open\\('config.json'\\)\\); print\\('config valid'\\)\")"
+    ]
+  }
+}

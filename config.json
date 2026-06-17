@@ -1,0 +1,197 @@
+{
+  "product": {
+    "name": "Intrynsic",
+    "url": "https://intrynsic.ai",
+    "one_liner": "AI-powered Indian stock analytics platform — a Bloomberg-terminal alternative for retail investors covering NSE/BSE. Currently free early access.",
+    "natural_mention_template": "I've been using Intrynsic (intrynsic.ai) lately — it's free early access and {benefit}"
+  },
+
+  "scout_time": "07:00",
+  "timezone": "Asia/Kolkata",
+
+  "llm": {
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "max_tokens": 1500,
+    "temperature": 0.8,
+    "min_interval_sec": 2,
+    "_note": "provider can be 'groq' (free, high limit) or 'gemini'. Gemini free = 20/day.",
+    "gemini_model": "gemini-2.5-flash-lite"
+  },
+
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 5050,
+    "url": "http://localhost:5050"
+  },
+
+  "email": {
+    "digest_subject_template": "🎯 Intrynsic Engagement Digest — {date} | {n_reddit} Reddit + {n_quora} Quora drafts ready",
+    "confirmation_subject_template": "✅ Posted today — {date}"
+  },
+
+  "reddit": {
+    "user_agent": "intrynsic-engagement-agent/1.0",
+    "no_karma_gate_subreddits": [
+      "IndiaInvestments",
+      "IndianStockMarket",
+      "DalalStreetTalks",
+      "personalfinanceindia"
+    ],
+    "all_subreddits": [
+      "IndiaInvestments",
+      "IndianStockMarket",
+      "DalalStreetTalks",
+      "personalfinanceindia",
+      "IndianStreetBets",
+      "ValueInvesting",
+      "stocks",
+      "SecurityAnalysis",
+      "investing",
+      "StockMarket"
+    ],
+    "min_score": 10,
+    "min_comments": 5,
+    "max_opportunities": 8,
+    "reply_word_range": [100, 200],
+    "priority_keywords": [
+      "stock screener",
+      "fundamental analysis",
+      "DCF",
+      "annual report",
+      "earnings call",
+      "NSE",
+      "BSE",
+      "intrinsic value",
+      "retail investor tools",
+      "how to analyze stocks",
+      "stock research",
+      "which tool",
+      "platform recommendation",
+      "Bloomberg alternative",
+      "stock analytics"
+    ],
+    "tool_recommendation_keywords": [
+      "which tool",
+      "what tool",
+      "platform recommendation",
+      "recommend a platform",
+      "recommend any tool",
+      "best tool",
+      "best platform",
+      "best website",
+      "best app",
+      "bloomberg alternative",
+      "bloomberg terminal",
+      "stock analytics",
+      "stock screener",
+      "retail investor tools",
+      "any good tools",
+      "what do you use",
+      "which website",
+      "which app",
+      "software for"
+    ],
+    "question_signals": [
+      "?",
+      "how do i",
+      "how to",
+      "what is",
+      "what are",
+      "which",
+      "can someone",
+      "anyone know",
+      "help me",
+      "eli5",
+      "explain",
+      "recommend",
+      "suggest"
+    ]
+  },
+
+  "quora": {
+    "topics": [
+      "Indian-Stock-Market",
+      "NSE-Investing",
+      "Value-Investing-India",
+      "Fundamental-Analysis",
+      "Retail-Investor-India"
+    ],
+    "rss_url_template": "https://www.quora.com/topic/{topic}/rss",
+    "max_opportunities": 5,
+    "answer_word_range": [200, 400],
+    "max_comments": 3,
+    "max_questions": 1,
+    "comment_word_range": [20, 60],
+    "search_keywords": [
+      "how to analyze stocks in India",
+      "DCF valuation Indian companies",
+      "P/E ratio NSE stocks",
+      "how to read an annual report India",
+      "best stock screener India",
+      "fundamental analysis NSE BSE",
+      "dividend investing India",
+      "how to read a balance sheet",
+      "Nifty 50 long term investing",
+      "intrinsic value of a stock",
+      "IPO investing India",
+      "mutual funds vs direct stocks India",
+      "tax on stock market gains India",
+      "small cap vs large cap stocks India",
+      "ROE and ROCE meaning stocks",
+      "cash flow statement analysis",
+      "debt to equity ratio stocks",
+      "quarterly results analysis India",
+      "undervalued stocks NSE BSE",
+      "how to start investing in share market India",
+      "shareholding pattern promoter holding",
+      "best long term stocks India",
+      "how to pick stocks for portfolio India"
+    ]
+  },
+
+  "twitter": {
+    "enabled": true,
+    "topics": [
+      "the Indian stock market",
+      "fundamental analysis of NSE/BSE stocks",
+      "value investing in India",
+      "reading annual reports and filings",
+      "common mistakes retail investors make"
+    ],
+    "tweets_per_run": 1,
+    "likes_per_run": 3,
+    "replies_per_run": 2,
+    "headless": false,
+    "char_limit": 280,
+    "allow_intrynsic": false
+  },
+
+  "front_page": {
+    "enabled": true,
+    "base_url": "https://front.page",
+    "comments_per_run": 2,
+    "posts_per_run": 0,
+    "upvotes_per_run": 3,
+    "headless": false,
+    "allow_intrynsic": false
+  },
+
+  "posting": {
+    "reddit_delay_sec": [300, 900],
+    "quora_delay_sec": [20, 45],
+    "twitter_delay_sec": [30, 60],
+    "quora_headless": false,
+    "rate_limit_wait_sec": 60,
+    "max_rate_limit_retries": 3
+  },
+
+  "warmup": {
+    "duration_days": 7,
+    "karma_target": 50,
+    "karma_subreddits": ["FreeKarma4U", "karma"],
+    "upvotes_per_day": [3, 5],
+    "warmup_comments_per_day": [1, 2],
+    "random_start_delay_min": [0, 45]
+  }
+}

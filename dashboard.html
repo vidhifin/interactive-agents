@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Intrynsic Engagement Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --line: #2a2e38; --txt: #e6e8ec;
+    --muted: #9aa3b2; --accent: #4f8cff; --green: #2ecc71; --red: #ff5c5c;
+    --amber: #ffb347;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--txt); line-height: 1.5;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10; background: #12151b;
+    border-bottom: 1px solid var(--line); padding: 16px 24px;
+  }
+  h1 { margin: 0 0 12px; font-size: 18px; }
+  .toprow { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: var(--card); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 8px; padding: 9px 16px; font-size: 14px; cursor: pointer;
+    font-weight: 600;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.go { background: var(--green); border-color: var(--green); color: #06231a; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .tabs { display: flex; gap: 8px; margin: 16px 0 8px; padding: 0 24px; }
+  .tab {
+    padding: 8px 16px; border-radius: 8px 8px 0 0; cursor: pointer;
+    border: 1px solid var(--line); border-bottom: none; background: #14171d;
+    color: var(--muted); font-weight: 600;
+  }
+  .tab.active { background: var(--card); color: var(--txt); }
+  .tabbar { display: flex; gap: 10px; padding: 0 24px 12px; align-items: center; }
+  main { padding: 0 24px 60px; max-width: 980px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card.posted { border-color: var(--green); }
+  .card.failed { border-color: var(--red); }
+  .meta { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+  .chip {
+    font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #232733;
+    color: var(--muted); border: 1px solid var(--line);
+  }
+  .chip.mention { background: #2a2238; color: var(--amber); border-color: #4a3a22; }
+  .chip.score { background: #1d2a22; color: var(--green); }
+  .chip.posted-chip { background: #1d2a22; color: var(--green); border-color: #2e6b4a; font-weight: 700; }
+  .posted-label { color: var(--green); font-weight: 700; }
+  .chip.action-chip { background: #22283a; color: #9db4ff; border-color: #33406a; font-weight: 700; }
+  .title { font-weight: 700; margin: 4px 0; }
+  .title a { color: var(--accent); text-decoration: none; }
+  .title a:hover { text-decoration: underline; }
+  .context { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  textarea {
+    width: 100%; min-height: 130px; background: #11141a; color: var(--txt);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    font-family: inherit; font-size: 14px; resize: vertical;
+  }
+  .cardfoot { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .approve { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+  .approve input { width: 18px; height: 18px; }
+  .status { font-size: 13px; font-weight: 700; margin-left: auto; }
+  .status.success { color: var(--green); }
+  .status.failed { color: var(--red); }
+  .status.posting { color: var(--amber); }
+  .hidden { display: none; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #232733; border: 1px solid var(--line); padding: 12px 18px;
+    border-radius: 8px; opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 Intrynsic Engagement Dashboard</h1>
+  <div class="toprow">
+    <button class="primary" onclick="approveAll()">✅ APPROVE ALL</button>
+    <button class="go" onclick="postEverything()">🚀 POST EVERYTHING APPROVED</button>
+    <button onclick="loadDrafts()">↻ Reload</button>
+    <span id="globalstatus" class="status"></span>
+  </div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" id="tab-reddit" onclick="switchTab('reddit')">Reddit</div>
+  <div class="tab" id="tab-quora" onclick="switchTab('quora')">Quora</div>
+  <div class="tab" id="tab-twitter" onclick="switchTab('twitter')">Twitter</div>
+</div>
+
+<div class="tabbar">
+  <button onclick="approveTab()">Approve All (this tab)</button>
+  <button class="go" onclick="postTab()">Post All Approved (this tab)</button>
+</div>
+
+<main id="list"></main>
+<div id="toast"></div>
+
+<script>
+let DRAFTS = [];
+let TAB = "reddit";
+let POLL = null;
+
+async function loadDrafts() {
+  const res = await fetch("/api/drafts");
+  DRAFTS = await res.json();
+  render();
+  refreshStatus();
+}
+
+function switchTab(t) {
+  TAB = t;
+  document.getElementById("tab-reddit").classList.toggle("active", t === "reddit");
+  document.getElementById("tab-quora").classList.toggle("active", t === "quora");
+  document.getElementById("tab-twitter").classList.toggle("active", t === "twitter");
+  render();
+}
+
+function render() {
+  const list = document.getElementById("list");
+  const items = DRAFTS.filter(d => d.platform === TAB);
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">No ' + TAB + ' drafts. Run the scout to generate some.</div>';
+    return;
+  }
+  list.innerHTML = items.map(cardHTML).join("");
+}
+
+function cardHTML(d) {
+  const where = d.platform === "reddit" ? ("r/" + d.subreddit)
+    : (d.platform === "twitter" ? ("X · " + (d.topic || "tweet")) : d.topic);
+  const mention = d.mentions_intrynsic
+    ? '<span class="chip mention">mentions Intrynsic</span>' : '';
+  const postedChip = d.posted ? '<span class="chip posted-chip">✅ POSTED</span>' : '';
+  const actionChip = d.action ? `<span class="chip action-chip">${d.action.toUpperCase()}</span>` : '';
+  const titleHTML = d.url
+    ? `<a href="${d.url}" target="_blank" rel="noopener">${escapeHTML(d.title)}</a>`
+    : escapeHTML(d.title);
+  // Posted drafts: locked, no checkbox, labelled "Posted". Others: approve box.
+  const viewLink = d.posted_url ? ` — <a href="${d.posted_url}" target="_blank" rel="noopener">view</a>` : '';
+  const foot = d.posted
+    ? `<span class="posted-label">✅ Posted${viewLink}</span>`
+    : `<label class="approve"><input type="checkbox" id="cb-${d.id}" ${d.approved ? "checked" : ""}/> Approve</label>`;
+  return `
+  <div class="card ${d.posted ? "posted" : ""}" id="card-${d.id}" data-id="${d.id}">
+    <div class="meta">
+      ${actionChip}
+      <span class="chip">${where}</span>
+      <span class="chip score">score ${d.opp_score}/10</span>
+      ${mention}
+      ${postedChip}
+    </div>
+    <div class="title">${titleHTML}</div>
+    <div class="context">${escapeHTML(d.context || "")}</div>
+    <textarea id="ta-${d.id}" ${d.posted ? "readonly" : ""}>${escapeHTML(d.draft)}</textarea>
+    <div class="cardfoot">
+      ${foot}
+      <span class="status" id="st-${d.id}"></span>
+    </div>
+  </div>`;
+}
+
+function collect() {
+  // Pull current textarea + checkbox state back into DRAFTS.
+  DRAFTS.forEach(d => {
+    const ta = document.getElementById("ta-" + d.id);
+    const cb = document.getElementById("cb-" + d.id);
+    if (ta) d.draft = ta.value;
+    if (cb) d.approved = cb.checked;
+  });
+}
+
+function approveAll() {
+  DRAFTS.forEach(d => {
+    if (d.posted) return;
+    const cb = document.getElementById("cb-" + d.id); if (cb) cb.checked = true; d.approved = true;
+  });
+  toast("All drafts approved across both tabs.");
+}
+
+function approveTab() {
+  DRAFTS.filter(d => d.platform === TAB && !d.posted).forEach(d => {
+    const cb = document.getElementById("cb-" + d.id); if (cb) cb.checked = true; d.approved = true;
+  });
+  toast("All " + TAB + " drafts approved.");
+}
+
+async function save() {
+  collect();
+  await fetch("/api/save", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ drafts: DRAFTS })
+  });
+}
+
+async function postEverything() {
+  collect();
+  const ids = DRAFTS.filter(d => d.approved && !d.posted).map(d => d.id);
+  await startPost(ids);
+}
+
+async function postTab() {
+  collect();
+  const ids = DRAFTS.filter(d => d.platform === TAB && d.approved && !d.posted).map(d => d.id);
+  await startPost(ids);
+}
+
+async function startPost(ids) {
+  if (!ids.length) { toast("Nothing approved to post."); return; }
+  if (!confirm("Post " + ids.length + " approved draft(s)? Posts are staggered with delays.")) return;
+  const res = await fetch("/api/post", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, drafts: DRAFTS })
+  });
+  const data = await res.json();
+  if (!data.ok) { toast(data.error || "Could not start posting."); return; }
+  toast("Posting started for " + data.count + " draft(s). Watch the ticks update.");
+  startPolling();
+}
+
+function startPolling() {
+  if (POLL) clearInterval(POLL);
+  POLL = setInterval(refreshStatus, 4000);
+  refreshStatus();
+}
+
+async function refreshStatus() {
+  const res = await fetch("/api/status");
+  const s = await res.json();
+  const results = s.results || {};
+  Object.entries(results).forEach(([id, r]) => {
+    const st = document.getElementById("st-" + id);
+    const card = document.getElementById("card-" + id);
+    if (!st) return;
+    if (r.status === "success") {
+      st.className = "status success";
+      st.innerHTML = '✓ posted — <a href="' + r.url + '" target="_blank">link</a>';
+      if (card) { card.classList.add("posted"); card.classList.remove("failed"); }
+    } else if (r.status === "failed") {
+      st.className = "status failed";
+      st.textContent = "✗ failed: " + (r.error || "");
+      if (card) { card.classList.add("failed"); card.classList.remove("posted"); }
+    } else if (r.status === "posting") {
+      st.className = "status posting"; st.textContent = "… posting";
+    } else if (r.status === "pending") {
+      st.className = "status"; st.textContent = "queued";
+    }
+  });
+  const g = document.getElementById("globalstatus");
+  if (s.running) { g.textContent = "Posting in progress…"; g.className = "status posting"; }
+  else if (s.finished_at) { g.textContent = "Last run finished " + s.finished_at; g.className = "status success"; if (POLL) { clearInterval(POLL); POLL = null; loadDrafts(); } }
+  else { g.textContent = ""; }
+}
+
+function escapeHTML(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+// Auto-save edits periodically so nothing is lost.
+setInterval(() => { if (DRAFTS.length) save(); }, 15000);
+
+loadDrafts();
+</script>
+</body>
+</html>
