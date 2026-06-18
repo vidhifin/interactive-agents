@@ -90,32 +90,65 @@ def _comment_submit(box):
 _CHROME = ("No Comments Yet", "Sort by", "Discover more", "Add a comment")
 
 
+def _save_card(action: str, title: str, text: str, url: str) -> None:
+    """Persist a front.page action as a 'posted' card so the dashboard shows it."""
+    try:
+        drafts = common.load_drafts()
+        cid = "frontpage_" + hashlib.md5((action + title).encode()).hexdigest()[:12]
+        if any(d.get("id") == cid for d in drafts):
+            return
+        ctx = {"comment": "comment on a post", "upvote": "upvoted a post",
+               "post": "original post"}.get(action, action)
+        drafts.append({
+            "id": cid, "platform": "frontpage", "action": action, "topic": "front.page",
+            "title": title[:120], "url": url, "context": ctx, "opp_score": 8,
+            "mentions_intrynsic": "intrynsic" in (text or "").lower(),
+            "draft": text or title, "posted": True, "posted_url": url, "approved": True,
+        })
+        common.save_drafts(drafts)
+    except Exception as e:  # noqa: BLE001
+        log.warning("front.page card save failed: %s", e)
+
+
 def _create_post(page, text: str) -> None:
     ta = page.query_selector("textarea")
     if not ta:
         raise RuntimeError("front.page: no composer textarea found")
     _click(ta)
     time.sleep(2)
-    # Clicking the composer opens a club-picker popper; choose "Post to Profile"
-    # as the destination so the editor becomes usable and Submit can enable.
-    ptp = page.query_selector('button:has-text("Post to Profile")')
-    if ptp:
-        _click(ptp)
-        time.sleep(1)
-    # Focus the editable composer and type.
+    # The destination picker is a Radix combobox of <div role="option">. Select
+    # "Post to Profile" (this closes the picker and unlocks the editor).
+    chose = page.evaluate(
+        "() => { const o=[...document.querySelectorAll('[role=option]')]"
+        ".find(x=>(x.innerText||'').trim().startsWith('Post to Profile'));"
+        " if (o) { o.click(); return true; } return false; }"
+    )
+    if not chose:
+        raise RuntimeError("front.page: destination option not found")
+    time.sleep(2)
     box = None
     for t in page.query_selector_all("textarea"):
-        if "insight" in (t.get_attribute("placeholder") or "").lower() and t.is_visible():
+        if t.is_visible() and t.is_editable():
             box = t
             break
-    box = box or page.query_selector("textarea")
-    _click(box)
-    page.keyboard.type(text, delay=5)
+    box = box or ta
+    # Set the value the React-compatible way (native setter + input event), so it
+    # registers even though the picker keeps stealing focus from keyboard typing.
+    box.evaluate(
+        "(el, val) => { const d = Object.getOwnPropertyDescriptor("
+        "window.HTMLTextAreaElement.prototype, 'value'); d.set.call(el, val);"
+        " el.dispatchEvent(new Event('input', {bubbles: true}));"
+        " el.dispatchEvent(new Event('change', {bubbles: true})); }",
+        text,
+    )
     time.sleep(1)
-    btn = page.query_selector('button:has-text("Submit")')
-    if not btn or btn.evaluate("b => b.disabled"):
-        raise RuntimeError("front.page: Submit stayed disabled (composer/club-picker)")
-    _click(btn)
+    ok = page.evaluate(
+        "() => { const b=[...document.querySelectorAll('button')]"
+        ".find(x=>/^Submit$/.test((x.innerText||'').trim()) && !x.disabled);"
+        " if (b) { b.click(); return true; } return false; }"
+    )
+    if not ok:
+        raise RuntimeError("front.page: Submit stayed disabled (composer/picker)")
     time.sleep(4)
 
 
@@ -169,6 +202,7 @@ def run_engagement(config: dict) -> list[tuple[str, str, str]]:
                     local.add(key)
                     common.add_posted(key)
                     done.append(("fp_upvote", txt[:60], base + "/"))
+                    _save_card("upvote", txt, "", base + "/")
                     up += 1
                     acted = True
                     time.sleep(random.uniform(3, 8))
@@ -212,6 +246,7 @@ def run_engagement(config: dict) -> list[tuple[str, str, str]]:
                     common.add_posted(key)
                     common.log_post("frontpage-comment", base + "/", draft)
                     done.append(("fp_comment", txt[:60], base + "/"))
+                    _save_card("comment", txt, draft, base + "/")
                     made += 1
                     acted = True
                     time.sleep(random.uniform(4, 10))
@@ -219,13 +254,17 @@ def run_engagement(config: dict) -> list[tuple[str, str, str]]:
                 if not acted:
                     break
 
-            # 3) CREATE POST (last — fragile: front.page opens a club-picker popper)
+            # 3) CREATE POST (last). Reload home first so the composer is the
+            # first textarea again (commenting/upvoting mutates the page).
             for _ in range(fp.get("posts_per_run", 0)):
                 try:
+                    page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+                    time.sleep(5)
                     text = common.draft_frontpage_post(config)
                     _create_post(page, text)
                     common.log_post("frontpage", base + "/", text)
                     done.append(("fp_post", text[:70], base + "/"))
+                    _save_card("post", text, text, base + "/")
                     log.info("front.page: posted an update")
                 except Exception as e:  # noqa: BLE001
                     log.warning("front.page post failed (club-picker/composer): %s", e)

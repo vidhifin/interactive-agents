@@ -171,7 +171,7 @@
     "enabled": true,
     "base_url": "https://front.page",
     "comments_per_run": 2,
-    "posts_per_run": 0,
+    "posts_per_run": 1,
     "upvotes_per_run": 3,
     "headless": false,
     "allow_intrynsic": false
