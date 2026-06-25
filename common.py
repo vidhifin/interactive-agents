@@ -1,9 +1,8 @@
 """
 common.py — shared helpers for the Intrynsic engagement agent.
 
-Holds: config/env loading, the persona, Gemini-powered drafting, the Reddit
-(PRAW) client, email sending, logging, draft/state storage, and the day-gating
-logic that decides which subreddits are active.
+Holds: config/env loading, the persona, LLM-powered drafting (Groq/Gemini),
+email sending, logging, and draft/ledger storage.
 
 Nothing in here posts anything on its own — posting lives in poster.py.
 """
@@ -29,10 +28,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 ENV_PATH = ROOT / ".env"
 DRAFTS_PATH = ROOT / "drafts.json"
-STATE_PATH = ROOT / "state.json"
-WARMUP_STATE_PATH = ROOT / "warmup_state.json"
 QUORA_STATE_PATH = ROOT / "quora_state.json"
-TWITTER_STATE_PATH = ROOT / "twitter_state.json"
 # X is bot-hostile: use a persistent REAL-Chrome profile (looks like a normal
 # browser) instead of a saved storage_state, so logins aren't flagged.
 TWITTER_PROFILE_DIR = ROOT / "twitter_profile"
@@ -98,6 +94,13 @@ def env(key: str, default: str = "") -> str:
     return os.environ.get(key, default) or default
 
 
+def is_tool_query(text: str, config: dict) -> bool:
+    """True if the text is asking about tools/platforms/screeners — the only place
+    Intrynsic may be mentioned. Drives mention_intrynsic automatically (no human)."""
+    t = (text or "").lower()
+    return any(k in t for k in config.get("tool_keywords", []))
+
+
 def require_env(*keys: str) -> None:
     """Raise a clear error if any required credential is missing from .env."""
     missing = [k for k in keys if not env(k)]
@@ -125,30 +128,6 @@ def _read_json(path: Path, default):
 def _write_json(path: Path, data) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def get_state() -> dict:
-    """Returns persistent state, creating start_date on first call."""
-    state = _read_json(STATE_PATH, {})
-    if "start_date" not in state:
-        state["start_date"] = dt.date.today().isoformat()
-        _write_json(STATE_PATH, state)
-    return state
-
-
-def days_since_start() -> int:
-    start = dt.date.fromisoformat(get_state()["start_date"])
-    return (dt.date.today() - start).days + 1  # day 1 on the first run
-
-
-def active_subreddits(config: dict) -> list[str]:
-    """
-    Day 1-7: only the four no-karma-gate subreddits.
-    Day 8+:  all subreddits.
-    """
-    if days_since_start() >= 8:
-        return config["reddit"]["all_subreddits"]
-    return config["reddit"]["no_karma_gate_subreddits"]
 
 
 # --------------------------------------------------------------------------- #
@@ -180,44 +159,39 @@ def add_posted(identifier: str) -> None:
         _write_json(POSTED_PATH, data)
 
 
+def now_str() -> str:
+    """Human-readable local timestamp for 'posted at' display/logging."""
+    return dt.datetime.now().strftime("%d %b %Y, %H:%M")
+
+
+# --------------------------------------------------------------------------- #
+# Recent-content memory — so generated posts don't repeat topic/opening/stocks.
+# --------------------------------------------------------------------------- #
+RECENT_PATH = ROOT / "recent.json"
+
+
+def note_recent(kind: str, text: str, keep: int = 12) -> None:
+    data = _read_json(RECENT_PATH, {})
+    lst = data.get(kind, [])
+    lst.append(text)
+    data[kind] = lst[-keep:]
+    _write_json(RECENT_PATH, data)
+
+
+def recent(kind: str, n: int = 6) -> list:
+    return _read_json(RECENT_PATH, {}).get(kind, [])[-n:]
+
+
 def mark_draft_posted(draft_id: str, url: str = "") -> None:
-    """Flag a draft as posted (and remember where) so the dashboard can link to it."""
+    """Flag a draft as posted (and remember where + when) for the dashboard."""
     drafts = load_drafts()
     for d in drafts:
         if d["id"] == draft_id:
             d["posted"] = True
+            d["posted_at"] = now_str()
             if url:
                 d["posted_url"] = url
     save_drafts(drafts)
-
-
-# --------------------------------------------------------------------------- #
-# Reddit (PRAW — official OAuth API)
-# --------------------------------------------------------------------------- #
-def get_reddit():
-    """Authenticated PRAW client for the single engagement account."""
-    import praw
-
-    require_env(
-        "REDDIT_USERNAME",
-        "REDDIT_PASSWORD",
-        "REDDIT_CLIENT_ID",
-        "REDDIT_CLIENT_SECRET",
-    )
-    config = load_config()
-    user_agent = f"{config['reddit']['user_agent']} (by u/{env('REDDIT_USERNAME')})"
-    return praw.Reddit(
-        client_id=env("REDDIT_CLIENT_ID"),
-        client_secret=env("REDDIT_CLIENT_SECRET"),
-        username=env("REDDIT_USERNAME"),
-        password=env("REDDIT_PASSWORD"),
-        user_agent=user_agent,
-    )
-
-
-def reddit_karma(reddit) -> int:
-    me = reddit.user.me()
-    return int(getattr(me, "comment_karma", 0)) + int(getattr(me, "link_karma", 0))
 
 
 # --------------------------------------------------------------------------- #
@@ -226,18 +200,19 @@ def reddit_karma(reddit) -> int:
 def send_email(subject: str, body: str, html: bool = False) -> None:
     require_env("GMAIL_ADDRESS", "GMAIL_APP_PASSWORD")
     sender = env("GMAIL_ADDRESS")
-    recipient = env("DIGEST_RECIPIENT") or sender
+    # DIGEST_RECIPIENT may be a comma-separated list of addresses.
+    recipients = [a.strip() for a in (env("DIGEST_RECIPIENT") or sender).split(",") if a.strip()]
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(body, "html" if html else "plain", "utf-8"))
 
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
         server.login(sender, env("GMAIL_APP_PASSWORD"))
-        server.sendmail(sender, [recipient], msg.as_string())
+        server.sendmail(sender, recipients, msg.as_string())
     log.info("Email sent: %s", subject)
 
 
@@ -245,45 +220,59 @@ def send_email(subject: str, body: str, html: bool = False) -> None:
 # Persona + Claude drafting
 # --------------------------------------------------------------------------- #
 PERSONA = """\
-You write as a knowledgeable but approachable Indian retail investor in your \
-early-30s (about 33).
+You write as a regular Indian retail investor — an ordinary working person in your
+early-30s who invests on the side. You are NOT an expert, analyst, advisor, or
+market guru. You sound like a normal human typing in a chat: casual, a little
+informal, sometimes unsure. Not polished, not authoritative, not a lecture.
 
-Voice rules (follow strictly):
-- Frame everything from your life-stage: you started investing ~10 years ago, \
-early in your career, and have lived through real market events — the 2020 COVID \
-crash and recovery, the 2018 NBFC/IL&FS scare, demonetization. Let that show in \
-your references and perspective (a working professional balancing a job, a salary, \
-and a growing portfolio). Do NOT state your age outright or force it — let it come \
-through naturally.
-- Speak from personal experience, not theory. Use "I" — what worked for you, \
-what confused you, what you tried.
-- Explain complex ideas (DCF, ratios, filings analysis, valuation) in simple, \
-plain language. Never condescending.
-- Occasionally ground things in Indian market context — Nifty, Sensex, specific \
-NSE/BSE names, BSE/NSE filings, annual reports, AGMs, screener.in habits, etc.
-- Come across as a fellow investor sharing what's worked, never a salesperson \
-or a brand account.
+How you talk:
+- Plain, everyday language. Short, natural sentences. A bit conversational and
+  imperfect, like a real person — not an essay.
+- Share from your own experience, but SOFTLY and tentatively: "I've personally
+  found...", "for me it kind of...", "not sure if this helps, but in my case...".
+  Always frame it as just one person's limited experience, never advice for all.
+- You may explain EVERGREEN facts and concepts (what a ratio means, how to read a
+  filing, what a term means) plainly, as information — not as a verdict.
 
-Hard bans:
-- Never open with "Great question!", "Great post!", "Thanks for sharing", or any \
-similar filler.
-- No marketing language, no hype, no buzzwords, no exclamation-heavy tone.
-- No emoji unless it would be genuinely natural and rare.
-- Don't sound like an ad or a press release. Write like a real Reddit/Quora comment.
+What you must NOT claim (you have NO live or recent data):
+- NEVER state current or recent market specifics as fact — no current prices, no
+  "Nifty/Sensex is at X", no "at a record/all-time high or low", no "the market
+  has been up/down lately", no recent results, news, or events. You cannot know
+  today's market; your knowledge of levels and news is out of date, so avoid it.
+- If a number is truly needed, make it clearly hypothetical ("say a stock at a
+  P/E of around 20...") — never a claim about the real, current market.
 
-About the product (mention ONLY when explicitly told to in the task):
-- Intrynsic is an AI-powered Indian stock analytics platform — a \
-Bloomberg-terminal alternative for retail investors covering NSE/BSE. It is in \
-early access and free right now.
-- ALWAYS include the full link https://intrynsic.ai/ whenever you mention \
-Intrynsic — exactly once, right where you name it. Never mention it without the link.
-- Frame it naturally as one of the tools you personally use, tied to the specific \
-thing the poster is asking about. One mention, woven in, never the focus of the \
-reply. Example of the right touch: "I've also been using Intrynsic \
-(https://intrynsic.ai/) lately which pulls all of this into one place — it's in \
-early access and free right now."
-- If the task says NOT to mention it, do not mention it or the link at all. Just \
-be genuinely helpful.
+Strict rules:
+- NEVER give strong opinions or tell anyone what to do. No "you should", no buy/
+  sell calls, no confident predictions. Hedge everything.
+- NEVER call any technique, strategy, tool, stock, or approach "the best" or "the
+  right way" — for investing, trading, analysis, anything. Describe trade-offs and
+  what you happen to use, making clear it's only your take.
+- Do NOT sound mature, wise, or guru-like. No grand lessons, no "what 10 years
+  taught me" wisdom. Stay humble and ordinary.
+- Vary your wording and structure. Do NOT open the same way or follow the same
+  template each time — your replies must not look mass-produced or repetitive.
+- Never open with "Great question!"/filler. No hype, no buzzwords, no marketing
+  tone. Rare or no emoji.
+- Keep Indian-market context light and in passing (NSE/BSE names, screener.in,
+  filings, AGMs) — never to show off, never with current price/level claims.
+
+Engagement:
+- If someone replies to you, you may respond once more, genuinely and briefly.
+  Don't keep a back-and-forth going forever — after a reply or two, let it rest.
+
+About Intrynsic — WHEN you may mention it (and only then):
+- Only if THIS specific draft's instructions say you may. If they don't, never
+  bring it up at all.
+- Even when allowed, mention it only if the conversation is genuinely about tools,
+  platforms, apps, websites, or screeners for analysing Indian stocks, doing
+  fundamental analysis, reading annual reports & filings, or a Bloomberg-terminal
+  style alternative. If a tool isn't relevant to what's being discussed, skip it.
+- When you do: mention it ONLY as one of the tools you personally happen to use
+  (it's in early access and free right now) — never as a recommendation, never
+  "the best", never the focus of your reply.
+- Always include the link https://intrynsic.ai/ exactly once, right next to it.
+- At most once per reply. Never force it. If unsure, leave it out.
 """
 
 
@@ -383,31 +372,6 @@ def _complete(user_prompt: str, config: dict) -> str:
     raise RuntimeError(f"{provider} failed after retries: {last_err}")
 
 
-def draft_reddit_reply(opportunity: dict, mention_intrynsic: bool, config: dict) -> str:
-    """Draft a 100-200 word Reddit reply in the persona voice."""
-    lo, hi = config["reddit"]["reply_word_range"]
-    mention_line = (
-        "This post IS asking for a tool/platform recommendation, so naturally "
-        "mention Intrynsic ONCE, tied to what they're asking for. Frame it as a "
-        "tool you personally use, in early access and free. Keep it understated."
-        if mention_intrynsic
-        else "This post is NOT asking for a tool recommendation. Do NOT mention "
-        "Intrynsic or the URL at all — just be genuinely helpful."
-    )
-    body = opportunity.get("selftext") or "(no body text — respond to the title)"
-    prompt = f"""\
-Write a Reddit reply ({lo}-{hi} words) to the post below, in r/{opportunity['subreddit']}.
-
-TITLE: {opportunity['title']}
-BODY: {body[:1500]}
-
-{mention_line}
-
-Be specific and actually useful — give concrete steps, numbers, or where to look,
-not vague encouragement. Output ONLY the reply text, nothing else."""
-    return _complete(prompt, config)
-
-
 def draft_quora_answer(opportunity: dict, mention_intrynsic: bool, config: dict) -> str:
     """Draft a 200-400 word Quora answer: direct answer -> explanation -> optional mention."""
     lo, hi = config["quora"]["answer_word_range"]
@@ -430,14 +394,20 @@ Output ONLY the answer text, nothing else."""
 
 
 def draft_quora_question(topic: str, config: dict) -> str:
-    """Generate ONE genuine question to ask on Quora (no promotion)."""
+    """Generate ONE genuine question to ask on Quora — varied, avoids repeats."""
+    recents = recent("quora_question", 8)
+    avoid = ""
+    if recents:
+        avoid = ("Your recent questions — do NOT ask anything similar or worded the "
+                 "same way:\n- " + "\n- ".join(r[:120] for r in recents) + "\n")
     prompt = f"""\
-Write ONE genuine question an Indian retail investor would naturally ask on Quora
-in the "{topic}" topic. Make it specific and real — something you'd actually wonder
-about (Indian markets, Nifty/Sensex, a sector, NSE/BSE filings, ratios, valuation).
-One sentence, ends with a question mark, no preamble or quotes. Do NOT mention Intrynsic.
+Write ONE genuine question an ordinary Indian retail investor would naturally ask
+on Quora, loosely about {topic}. Something you'd actually wonder — real and a bit
+specific. One sentence, ends with a question mark, no preamble or quotes. Vary your
+phrasing — do NOT always start with "How" or "What is". No current market levels/
+prices. Do NOT mention Intrynsic.
 
-Output ONLY the question text."""
+{avoid}Output ONLY the question text."""
     return _complete(prompt, config).strip().strip('"')
 
 
@@ -465,8 +435,28 @@ Output ONLY the comment text."""
     return _complete(prompt, config)
 
 
-def draft_frontpage_post(config: dict) -> str:
-    """Original post for the front.page Indian stock community."""
+_FP_ANGLES = [
+    "ask the community ONE genuine question you're actually unsure about",
+    "share a small, humble lesson or mistake from your own investing, briefly",
+    "explain ONE simple concept in plain words, like to a beginner",
+    "post a short open-ended thought you're mulling over, with no firm conclusion",
+    "ask what others are currently reading, using, or watching",
+    "raise a small doubt about a sector or a type of stock, kept general",
+    "react to a common debate (SIP vs lumpsum, large- vs small-cap, active vs passive, "
+    "growth vs value) WITHOUT declaring a winner",
+    "share a tiny habit or routine that works for you, softly",
+    "ask for book / resource / podcast recommendations",
+    "admit something you find confusing and ask how others handle it",
+]
+
+
+def draft_frontpage_post(config: dict, club: str | None = None) -> str:
+    """Original post for front.page — rotates an angle + avoids repeating recents.
+
+    If `club` is given, the post is tailored to that community's focus.
+    """
+    import random as _r
+
     fp = config.get("front_page", {})
     mention_line = (
         "You MAY weave in a natural Intrynsic mention with the link https://intrynsic.ai/ "
@@ -474,13 +464,35 @@ def draft_frontpage_post(config: dict) -> str:
         if fp.get("allow_intrynsic", False)
         else "Do NOT mention Intrynsic."
     )
-    prompt = f"""\
-Write a SHORT original post for an Indian stock-market community (front.page), as
-an early-30s retail investor. A genuine market view, observation, or tip — 2 to 4
-sentences, specific (name a stock/sector/Nifty level/ratio), conversational. No
-"Great...", no hype, at most 1-2 hashtags. {mention_line}
+    angle = _r.choice(_FP_ANGLES)
+    topics = fp.get("topics") or ["the markets generally"]
+    topic = _r.choice(topics)
+    club_line = (
+        f"This post goes into the \"{club}\" club, so keep it genuinely relevant to "
+        f"that community's focus.\n"
+        if club else ""
+    )
+    recents = recent("frontpage_post", 6)
+    avoid = ""
+    if recents:
+        avoid = ("Here are your RECENT posts — do NOT repeat their topic, the same "
+                 "stocks, or the same opening line; sound clearly different:\n- "
+                 + "\n- ".join(r[:130] for r in recents) + "\n")
 
-Output ONLY the post text."""
+    prompt = f"""\
+Write ONE short post for an Indian stock-market community (front.page), as an
+ordinary early-30s retail investor — like a real person typing off the cuff.
+
+{club_line}This specific post: {angle}. Loosely around {topic}.
+
+Make it feel human and varied:
+- Do NOT open with "I've been tracking/watching..." or a recital of stock tickers.
+- You usually do NOT need to name specific stocks — often better not to.
+- Casual, a little informal. Length can be 1 to 3 sentences (vary it).
+- No "best", no predictions, no current/real market prices or index levels.
+{mention_line}
+
+{avoid}Output ONLY the post text."""
     return _complete(prompt, config).strip().strip('"')
 
 
@@ -505,22 +517,47 @@ Output ONLY the comment text."""
     return _complete(prompt, config).strip().strip('"')
 
 
+_TWEET_ANGLES = [
+    "ask a genuine question to other investors",
+    "share a small personal habit or routine, softly",
+    "a short relatable thought or doubt about investing, with no conclusion",
+    "a light, mildly self-deprecating thought about being a retail investor",
+    "react to a common debate (SIP vs lumpsum, growth vs value, etc.) without picking a winner",
+    "a tiny lesson you're still figuring out",
+    "ask what others are reading / using / following",
+    "an everyday observation about investing life",
+]
+
+
 def draft_tweet(topic: str, mention_intrynsic: bool, config: dict) -> str:
-    """One original tweet in the persona voice (<= char limit)."""
+    """One original tweet — rotates an angle + avoids repeating recent tweets."""
+    import random as _r
+
     limit = config.get("twitter", {}).get("char_limit", 280)
     mention_line = (
-        "You MAY weave in a natural Intrynsic mention ONLY if it genuinely fits; "
-        "otherwise skip it."
+        "You MAY weave in a natural Intrynsic mention with the link only if it genuinely "
+        "fits; otherwise skip it."
         if mention_intrynsic
         else "Do NOT mention Intrynsic."
     )
+    angle = _r.choice(_TWEET_ANGLES)
+    recents = recent("tweet", 6)
+    avoid = ""
+    if recents:
+        avoid = ("Your recent tweets — do NOT repeat their angle, wording, or topic:\n- "
+                 + "\n- ".join(r[:120] for r in recents) + "\n")
     prompt = f"""\
-Write ONE tweet (max {limit} characters) as an Indian retail investor — a genuine,
-useful market insight, observation, or tip about {topic} (Nifty/Sensex/NSE/BSE,
-fundamentals, valuation). Specific and conversational, not generic. No "Great
-question", no hashtag spam (0-2 tasteful hashtags at most). {mention_line}
+Write ONE tweet (max {limit} characters) as an ordinary early-30s Indian retail
+investor — like a real person, off the cuff.
 
-Output ONLY the tweet text."""
+This tweet: {angle}. Loosely around {topic}.
+- Vary your opening; don't sound like your other tweets.
+- You usually don't need to name specific stocks; NO current prices or index
+  levels, no "best", no predictions.
+- Casual and human. 0-2 tasteful hashtags at most.
+{mention_line}
+
+{avoid}Output ONLY the tweet text."""
     t = _complete(prompt, config).strip().strip('"')
     if len(t) > limit:  # drop the partial last word instead of cutting mid-word
         t = t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")

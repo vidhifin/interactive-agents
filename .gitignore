@@ -1,15 +1,12 @@
 .env
 quora_state.json
-twitter_state.json
 twitter_profile/
 frontpage_state.json
-state.json
-warmup_state.json
 drafts.json
+recent.json
 post_status.json
 logs/*.log
 errors.log
 __pycache__/
 *.pyc
 .venv/
-venv/

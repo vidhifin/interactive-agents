@@ -1,24 +1,15 @@
 """
-scout.py — the daily morning scout.
+scout.py — generates the day's Quora + X/Twitter drafts.
 
-Reddit:
-  - fetch top posts from the last 24h across the active subreddits
-  - filter: score > 10, comments > 5
-  - also scan top-level comments for unanswered questions
-  - score each opportunity 1-10 (keywords + question-type + engagement)
-  - take the top 8, draft a 100-200 word reply in the persona voice
-  - mention Intrynsic ONLY on tool/platform-recommendation posts
+Quora (RSS was discontinued by Quora, so we scrape with a logged-in browser):
+  - search each keyword for matching questions
+  - draft a 200-400 word answer per question, plus a few comments and a question
+  - mention Intrynsic ONLY on tool/platform-recommendation questions
 
-Quora (RSS was discontinued by Quora, so we scrape the topic pages with a
-logged-in browser session instead):
-  - open each topic's "unanswered" page in Playwright
-  - collect question titles + links (anything ending in "?")
-  - prioritize them, take the top 5, draft a 200-400 word answer
+X/Twitter:
+  - draft original tweets, and search X for tweets to reply to
 
-Then it saves everything to drafts.json and emails the digest.
-
-Usage:
-    python scout.py
+The drafts are consumed by daily.py (the 10am auto-run), which posts them.
 """
 
 from __future__ import annotations
@@ -35,178 +26,6 @@ BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-
-
-# --------------------------------------------------------------------------- #
-# Scoring helpers
-# --------------------------------------------------------------------------- #
-def _text_of(title: str, body: str) -> str:
-    return f"{title}\n{body}".lower()
-
-
-def _is_tool_recommendation(text: str, config: dict) -> bool:
-    kws = config["reddit"]["tool_recommendation_keywords"]
-    return any(kw in text for kw in kws)
-
-
-def _looks_like_question(text: str, config: dict) -> bool:
-    sigs = config["reddit"]["question_signals"]
-    return any(sig in text for sig in sigs)
-
-
-def score_reddit(title: str, body: str, score: int, num_comments: int, config: dict) -> tuple[int, str]:
-    """
-    Return (1-10 score, one-line reason). Weighting:
-      - keyword relevance
-      - question-type (higher priority)
-      - engagement (score + comments)
-    """
-    text = _text_of(title, body)
-    reasons = []
-    points = 0.0
-
-    matched = [kw for kw in config["reddit"]["priority_keywords"] if kw.lower() in text]
-    if matched:
-        points += min(len(matched), 4) * 1.2
-        reasons.append(f"keywords: {', '.join(matched[:3])}")
-
-    if _is_tool_recommendation(text, config):
-        points += 3.0
-        reasons.append("asking for a tool/platform")
-
-    if _looks_like_question(text, config):
-        points += 2.0
-        reasons.append("question-type post")
-
-    # Engagement, gently scaled.
-    points += min(score / 50.0, 2.0)
-    points += min(num_comments / 30.0, 1.5)
-    reasons.append(f"{score} upvotes / {num_comments} comments")
-
-    final = max(1, min(10, round(points)))
-    return final, "; ".join(reasons)
-
-
-# --------------------------------------------------------------------------- #
-# Reddit scout
-# --------------------------------------------------------------------------- #
-def scout_reddit(config: dict) -> list[dict]:
-    reddit = common.get_reddit()
-    subs = common.active_subreddits(config)
-    posted = common.load_posted()
-    log.info("Reddit scout across: %s", ", ".join(subs))
-
-    min_score = config["reddit"]["min_score"]
-    min_comments = config["reddit"]["min_comments"]
-    cutoff = time.time() - 24 * 3600
-    candidates: list[dict] = []
-
-    for sub in subs:
-        try:
-            for post in reddit.subreddit(sub).top(time_filter="day", limit=40):
-                if post.stickied:
-                    continue
-                if post.id in posted:  # already replied to this one
-                    continue
-                if post.created_utc < cutoff:
-                    continue
-                if post.score <= min_score or post.num_comments <= min_comments:
-                    continue
-
-                body = post.selftext or ""
-                sc, reason = score_reddit(post.title, body, post.score, post.num_comments, config)
-                candidates.append(
-                    {
-                        "kind": "post",
-                        "platform": "reddit",
-                        "subreddit": sub,
-                        "title": post.title,
-                        "selftext": body,
-                        "url": f"https://www.reddit.com{post.permalink}",
-                        "target_id": post.id,
-                        "score_num": post.score,
-                        "comments_num": post.num_comments,
-                        "opp_score": sc,
-                        "context": reason,
-                    }
-                )
-
-                # Also scan top-level comments for unanswered questions.
-                _scan_comments_for_questions(post, sub, config, candidates)
-
-        except Exception as e:  # noqa: BLE001
-            log.warning("Reddit scout failed in r/%s: %s", sub, e)
-
-    # Dedup by target id, keep highest score, take top N.
-    best: dict[str, dict] = {}
-    for c in candidates:
-        key = c["target_id"]
-        if key not in best or c["opp_score"] > best[key]["opp_score"]:
-            best[key] = c
-    ranked = sorted(best.values(), key=lambda c: c["opp_score"], reverse=True)
-    top = ranked[: config["reddit"]["max_opportunities"]]
-
-    log.info("Reddit: %d candidates -> %d opportunities", len(best), len(top))
-
-    drafts = []
-    for opp in top:
-        text = _text_of(opp["title"], opp.get("selftext", ""))
-        mention = _is_tool_recommendation(text, config)
-        try:
-            draft = common.draft_reddit_reply(opp, mention_intrynsic=mention, config=config)
-        except Exception as e:  # noqa: BLE001
-            log.warning("Drafting failed for %s: %s", opp["url"], e)
-            continue
-        drafts.append(
-            {
-                "id": f"reddit_{opp['target_id']}",
-                "platform": "reddit",
-                "subreddit": opp["subreddit"],
-                "title": opp["title"],
-                "url": opp["url"],
-                "target_id": opp["target_id"],
-                "kind": opp["kind"],
-                "context": opp["context"],
-                "opp_score": opp["opp_score"],
-                "mentions_intrynsic": mention,
-                "draft": draft,
-                "approved": False,
-            }
-        )
-    return drafts
-
-
-def _scan_comments_for_questions(post, sub, config, candidates) -> None:
-    """Look at top-level comments; surface unanswered questions as opportunities."""
-    try:
-        post.comments.replace_more(limit=0)
-        for c in post.comments[:25]:
-            text = (c.body or "").lower()
-            if "?" not in text or len(text) < 25:
-                continue
-            # "unanswered" heuristic: no replies
-            if len(c.replies) > 0:
-                continue
-            sc, reason = score_reddit(c.body, "", c.score, 0, config)
-            # comment-level opportunities are slightly down-weighted
-            sc = max(1, sc - 1)
-            candidates.append(
-                {
-                    "kind": "comment",
-                    "platform": "reddit",
-                    "subreddit": sub,
-                    "title": f"[unanswered comment] {c.body[:120]}",
-                    "selftext": c.body,
-                    "url": f"https://www.reddit.com{c.permalink}",
-                    "target_id": c.id,
-                    "score_num": c.score,
-                    "comments_num": 0,
-                    "opp_score": sc,
-                    "context": f"unanswered question in comments; {reason}",
-                }
-            )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Comment scan failed on %s: %s", getattr(post, "id", "?"), e)
 
 
 # --------------------------------------------------------------------------- #
@@ -324,8 +143,9 @@ def scout_quora(config: dict) -> list[dict]:
             for kw, q in answer_pool[: config["quora"]["max_opportunities"]]:
                 used.add(q["url"])
                 opp = {"topic": kw, "title": q["title"]}
+                mention = common.is_tool_query(q["title"], config)
                 try:
-                    txt = common.draft_quora_answer(opp, mention_intrynsic=True, config=config)
+                    txt = common.draft_quora_answer(opp, mention_intrynsic=mention, config=config)
                 except Exception as e:  # noqa: BLE001
                     log.warning("Quora answer drafting failed for %s: %s", q["url"], e)
                     continue
@@ -342,7 +162,7 @@ def scout_quora(config: dict) -> list[dict]:
                 snippet = _grab_top_answer(page, q["url"])
                 if not snippet:  # nothing to comment on yet -> skip
                     continue
-                mention = (made == 0)  # "rarely" -> only the first comment may mention Intrynsic
+                mention = common.is_tool_query(q["title"], config)  # only on tool-related posts
                 try:
                     txt = common.draft_quora_comment(q["title"], snippet, mention, config)
                 except Exception as e:  # noqa: BLE001
@@ -360,6 +180,7 @@ def scout_quora(config: dict) -> list[dict]:
                 except Exception as e:  # noqa: BLE001
                     log.warning("Quora question generation failed: %s", e)
                     continue
+                common.note_recent("quora_question", qtext)
                 drafts.append(_quora_draft("question", kw, qtext, "", "new question to ask", qtext))
         finally:
             context.close()
@@ -392,6 +213,7 @@ def scout_twitter(config: dict) -> list[dict]:
         except Exception as e:  # noqa: BLE001
             log.warning("Tweet generation failed: %s", e)
             continue
+        common.note_recent("tweet", text)
         tid = hashlib.md5(f"tweet|{today}|{i}|{topic}".encode()).hexdigest()[:12]
         drafts.append(
             {
@@ -452,62 +274,3 @@ def scout_twitter(config: dict) -> list[dict]:
     n_reply = sum(1 for d in drafts if d["action"] == "reply")
     log.info("Twitter: %d tweet(s), %d reply draft(s)", n_tweet, n_reply)
     return drafts
-
-
-# --------------------------------------------------------------------------- #
-# Email digest
-# --------------------------------------------------------------------------- #
-def send_digest(reddit_drafts, quora_drafts, config) -> None:
-    date_str = dt.date.today().strftime("%d %b %Y")
-    subject = config["email"]["digest_subject_template"].format(
-        date=date_str, n_reddit=len(reddit_drafts), n_quora=len(quora_drafts)
-    )
-    dash = config["dashboard"]["url"]
-    body = f"""\
-Open your approval dashboard -> {dash}
-
-REDDIT: {len(reddit_drafts)} drafts
-QUORA: {len(quora_drafts)} drafts
-
-Approve, edit, and post in under 5 minutes.
-"""
-    try:
-        common.send_email(subject, body)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Digest email failed: %s", e)
-
-
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
-def main() -> None:
-    config = common.load_config()
-    common.get_state()  # ensure start_date exists for day-gating
-
-    log.info("==== Scout run %s (day %d) ====", dt.date.today().isoformat(),
-             common.days_since_start())
-
-    # Each platform is isolated: if Reddit creds are missing or Quora is down,
-    # the other still runs and you still get a digest.
-    try:
-        reddit_drafts = scout_reddit(config)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Reddit scout skipped: %s", e)
-        reddit_drafts = []
-
-    try:
-        quora_drafts = scout_quora(config)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Quora scout skipped: %s", e)
-        quora_drafts = []
-
-    all_drafts = reddit_drafts + quora_drafts
-    common.save_drafts(all_drafts)
-    log.info("Saved %d drafts to drafts.json", len(all_drafts))
-
-    send_digest(reddit_drafts, quora_drafts, config)
-    log.info("Scout complete. Open %s to review.", config["dashboard"]["url"])
-
-
-if __name__ == "__main__":
-    main()

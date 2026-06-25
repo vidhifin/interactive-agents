@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(.venv/Scripts/python.exe -m py_compile poster.py)",
-      "Bash(.venv/Scripts/python.exe -c \"import json; json.load\\(open\\('config.json'\\)\\); print\\('config valid'\\)\")"
+      "Bash(.venv/Scripts/python.exe -c \"import json; json.load\\(open\\('config.json'\\)\\); print\\('config valid'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m py_compile common.py front_page_web.py)",
+      "Bash(cat)",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe _fpv.py)",
+      "Bash(rm -f _fpv.py)"
     ]
   }
 }

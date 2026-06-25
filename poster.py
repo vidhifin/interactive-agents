@@ -2,7 +2,7 @@
 poster.py — Flask server (localhost:5050) + the auto-poster.
 
 Serves the approval dashboard, exposes a small JSON API, and posts approved
-drafts to Reddit (PRAW) and Quora (Playwright). Posting runs in a background
+drafts to Quora (Playwright) and X/Twitter. Posting runs in a background
 thread and is staggered with randomized delays; the dashboard polls /api/status
 to show a green tick / red cross per draft.
 
@@ -59,34 +59,6 @@ def _set_result(state: dict, draft_id: str, **fields) -> None:
     state["results"].setdefault(draft_id, {})
     state["results"][draft_id].update(fields)
     _save_status(state)
-
-
-# --------------------------------------------------------------------------- #
-# Reddit posting (PRAW)
-# --------------------------------------------------------------------------- #
-def _post_reddit(reddit, draft: dict, config: dict) -> str:
-    """Reply to a submission or comment. Returns the permalink. Retries on rate limit."""
-    import praw
-
-    max_retries = config["posting"]["max_rate_limit_retries"]
-    wait = config["posting"]["rate_limit_wait_sec"]
-
-    for attempt in range(max_retries + 1):
-        try:
-            if draft.get("kind") == "comment":
-                target = reddit.comment(id=draft["target_id"])
-            else:
-                target = reddit.submission(id=draft["target_id"])
-            posted = target.reply(draft["draft"])
-            return f"https://www.reddit.com{posted.permalink}"
-        except praw.exceptions.RedditAPIException as e:
-            is_ratelimit = any(getattr(item, "error_type", "") == "RATELIMIT" for item in e.items)
-            if is_ratelimit and attempt < max_retries:
-                log.warning("Reddit rate limit; waiting %ss (attempt %d)", wait, attempt + 1)
-                time.sleep(wait)
-                continue
-            raise
-    raise RuntimeError("Exhausted rate-limit retries")
 
 
 # --------------------------------------------------------------------------- #
@@ -368,6 +340,296 @@ def _post_quora_question(draft: dict, config: dict) -> str:
         pw.stop()
 
 
+def quora_followups(config: dict) -> list[tuple[str, str]]:
+    """Reply once to people who COMMENTED on / replied to your Quora answers.
+    Ignores upvote/follow notifications. Capped via the ledger so it never loops.
+    Returns [(snippet, url)]."""
+    import hashlib
+
+    qcfg = config.get("quora", {})
+    n = qcfg.get("followups_per_run", 0)
+    if not n or not common.QUORA_STATE_PATH.exists():
+        return []
+    posted = common.load_posted()
+    done: list[tuple[str, str]] = []
+    pw, browser, context, page = _quora_browser(config)
+    try:
+        _quora_login(page, context)
+        page.goto("https://www.quora.com/notifications", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(5)
+        for _ in range(3):
+            page.mouse.wheel(0, 2000)
+            time.sleep(1.5)
+        # Only comment/reply/mention notifications — never upvotes/follows.
+        rows = page.evaluate(
+            "() => { const out=[], seen=new Set();"
+            " for (const e of document.querySelectorAll('div,span')) {"
+            "  const t=(e.innerText||'').trim();"
+            "  if(!t||t.length<15||t.length>160) continue;"
+            "  if(!/commented on your|replied to your|replied to you|mentioned you/i.test(t)) continue;"
+            "  if(/upvoted|started following|followed you/i.test(t)) continue;"
+            "  if(seen.has(t)) continue; seen.add(t); out.push(t);"
+            "  if(out.length>=15) break; } return out; }"
+        )
+        targets = []
+        for t in rows:
+            key = "qfollowup:" + hashlib.md5(t.encode()).hexdigest()[:12]
+            if key not in posted:
+                targets.append((t, key))
+            if len(targets) >= n:
+                break
+
+        for text, key in targets:
+            try:
+                clicked = page.evaluate(
+                    "(txt) => { const el=[...document.querySelectorAll('div,span')]"
+                    ".find(e=>(e.innerText||'').trim().includes(txt));"
+                    " if(!el) return false; (el.closest('a')||el).click(); return true; }",
+                    text[:40],
+                )
+                if not clicked:
+                    raise RuntimeError("notification row not clickable")
+                time.sleep(5)
+                draft = common.draft_quora_comment(text, "", False, config)
+                box = None
+                for ta in page.query_selector_all("textarea"):
+                    if "comment" in (ta.get_attribute("placeholder") or "").lower() and ta.is_visible():
+                        box = ta
+                        break
+                if not box:
+                    raise RuntimeError("comment composer not found")
+                _robust_click(box)
+                page.keyboard.type(draft, delay=6)
+                time.sleep(1)
+                submitted = False
+                for sel in ['button:has-text("Post")', 'button:has-text("Comment")',
+                            'button:has-text("Add Comment")', 'button[aria-label*="post" i]']:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible() and el.is_enabled():
+                        _robust_click(el)
+                        submitted = True
+                        break
+                if not submitted:
+                    raise RuntimeError("comment submit not found")
+                time.sleep(3)
+                common.add_posted(key)
+                common.log_post("quora-followup", page.url, draft)
+                done.append((text[:60], page.url))
+                page.goto("https://www.quora.com/notifications",
+                          wait_until="domcontentloaded", timeout=30000)
+                time.sleep(4)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Quora follow-up failed: %s", e)
+    finally:
+        context.close()
+        browser.close()
+        pw.stop()
+
+    log.info("Quora: %d follow-up replies", len(done))
+    return done
+
+
+def quora_join_spaces(config: dict) -> list[tuple[str, str]]:
+    """Discover finance Quora Spaces and auto-follow the good ones (capped, tracked).
+    Returns [(name, url)]."""
+    qcfg = config.get("quora", {})
+    n = qcfg.get("follow_spaces_per_run", 0)
+    if not n or not common.QUORA_STATE_PATH.exists():
+        return []
+    filters = [w.lower() for w in (qcfg.get("space_keywords")
+               or ["stock", "market", "invest", "finance", "trading", "equity"])]
+    posted = common.load_posted()
+    followed: list[tuple[str, str]] = []
+    pw, browser, context, page = _quora_browser(config)
+    try:
+        _quora_login(page, context)
+        page.goto("https://www.quora.com/spaces", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(6)
+        page.mouse.wheel(0, 2000)
+        time.sleep(2)
+        cands = page.evaluate(
+            "() => { const out=[], seen=new Set();"
+            " for (const a of document.querySelectorAll('a[href]')) {"
+            "  const h=a.getAttribute('href'); const t=(a.innerText||'').trim();"
+            "  const m=h && h.match(/^https?:\\/\\/([a-z0-9-]+)\\.quora\\.com\\/?$/i);"
+            "  if (m && t && t.length<55 && !seen.has(m[1]) && !['www','help','business'].includes(m[1])) {"
+            "    seen.add(m[1]); out.push({sub:m[1], t:t}); } }"
+            " return out; }"
+        )
+        picked = []
+        for c in cands:
+            if not any(w in c["t"].lower() for w in filters):
+                continue
+            sub = c["sub"] + ".quora.com"
+            if ("qspace:" + sub) in posted:
+                continue
+            picked.append((c["t"], sub))
+        for name, sub in picked[:n]:
+            try:
+                page.goto("https://" + sub + "/", wait_until="domcontentloaded", timeout=30000)
+                time.sleep(5)
+                btn = None
+                for b in page.query_selector_all("button"):
+                    if (b.inner_text() or "").strip() == "Follow":
+                        btn = b
+                        break
+                common.add_posted("qspace:" + sub)
+                common.note_recent("quora_space", sub, keep=50)
+                if btn:
+                    _robust_click(btn)
+                    time.sleep(3)
+                    followed.append((name, "https://" + sub + "/"))
+                    log.info("Followed Quora space: %s", name)
+                    time.sleep(random.uniform(4, 9))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Quora space follow failed (%s): %s", name, e)
+    finally:
+        context.close()
+        browser.close()
+        pw.stop()
+    log.info("Quora: followed %d new spaces", len(followed))
+    return followed
+
+
+def _q_post_text(btn) -> str:
+    """Grab the actual post text near a feed button (skip the Upvote/Comment row)."""
+    try:
+        raw = btn.evaluate(
+            "b => { let e=b; for (let i=0;i<10;i++){ if(e.parentElement) e=e.parentElement; } return e.innerText||''; }"
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    junk = {"upvote", "comment", "share", "follow", "downvote", "report", "more",
+            "answer", "request", "related", "·"}
+    good = []
+    for line in (raw or "").split("\n"):
+        l = line.strip()
+        if len(l) <= 25 or l.lower() in junk:
+            continue
+        if l.replace(",", "").replace(".", "").replace("K", "").isdigit():
+            continue
+        good.append(l)
+    return " ".join(good)[:200]
+
+
+def quora_space_engagement(config: dict) -> list[tuple[str, str]]:
+    """Comment + upvote on posts INSIDE relevant Quora Spaces (communities).
+    Ledger-deduped. Returns [(snippet, url)]."""
+    import hashlib
+
+    qcfg = config.get("quora", {})
+    spaces = list(dict.fromkeys((qcfg.get("spaces") or []) + common.recent("quora_space", 50)))
+    n_targets = qcfg.get("space_targets_per_run", 6)
+    u_per = qcfg.get("upvotes_per_space", 0)
+    c_per = qcfg.get("comments_per_space", 0)
+    if not spaces or not common.QUORA_STATE_PATH.exists() or (not u_per and not c_per):
+        return []
+    posted = common.load_posted()
+    local: set = set()
+    done: list[tuple[str, str]] = []
+    order = list(spaces)
+    random.shuffle(order)
+    order = order[:n_targets]
+    pw, browser, context, page = _quora_browser(config)
+    try:
+        _quora_login(page, context)
+
+        # Visit up to N spaces; do per-space upvotes + comments in EACH.
+        for sp in order:
+            url = sp if sp.startswith("http") else "https://" + sp
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                time.sleep(5)
+                page.mouse.wheel(0, 1500)
+                time.sleep(2)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Quora space open failed (%s): %s", sp, e)
+                continue
+
+            # ---- upvotes in THIS space ----
+            up = 0
+            for vb in page.query_selector_all("button[aria-label]"):
+                if up >= u_per:
+                    break
+                al = (vb.get_attribute("aria-label") or "").lower()
+                if not al.startswith("upvote") or al.startswith("upvoted"):
+                    continue
+                txt = _q_post_text(vb)
+                key = "qsv:" + hashlib.md5(txt.encode()).hexdigest()[:12]
+                if not txt or key in posted or key in local:
+                    continue
+                try:
+                    _robust_click(vb)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Quora space upvote failed: %s", e)
+                    continue
+                local.add(key)
+                common.add_posted(key)
+                done.append(("qs_upvote", txt[:60], url))
+                up += 1
+                time.sleep(random.uniform(2, 5))
+
+            # ---- comments in THIS space ----
+            made = 0
+            cbtns = [b for b in page.query_selector_all("button[aria-label]")
+                     if "comment" in (b.get_attribute("aria-label") or "").lower()]
+            for cb in cbtns:
+                if made >= c_per:
+                    break
+                txt = _q_post_text(cb)
+                key = "qsc:" + hashlib.md5(txt.encode()).hexdigest()[:12]
+                if not txt or key in posted or key in local:
+                    continue
+                try:
+                    draft = common.draft_quora_comment(txt, "", False, config)
+                    _robust_click(cb)
+                    time.sleep(3)
+                    # Space comment composer is a contenteditable (not a textarea).
+                    box = None
+                    for ce in page.query_selector_all('[contenteditable="true"]'):
+                        if ce.is_visible():
+                            box = ce
+                            break
+                    if not box:
+                        for ta in page.query_selector_all("textarea"):
+                            if ta.is_visible():
+                                box = ta
+                                break
+                    if not box:
+                        raise RuntimeError("space comment box not found")
+                    _robust_click(box)
+                    page.keyboard.type(draft, delay=5)
+                    time.sleep(1)
+                    submitted = False
+                    for sel in ['button:has-text("Post")', 'button:has-text("Comment")',
+                                'button:has-text("Add Comment")', 'button[aria-label*="post" i]']:
+                        el = page.query_selector(sel)
+                        if el and el.is_visible() and el.is_enabled():
+                            _robust_click(el)
+                            submitted = True
+                            break
+                    if not submitted:
+                        raise RuntimeError("space comment submit not found")
+                    time.sleep(3)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Quora space comment failed: %s", e)
+                    local.add(key)
+                    continue
+                local.add(key)
+                common.add_posted(key)
+                common.log_post("quora-space-comment", url, draft)
+                done.append(("qs_comment", txt[:60], url))
+                made += 1
+                time.sleep(random.uniform(4, 10))
+    finally:
+        context.close()
+        browser.close()
+        pw.stop()
+
+    log.info("Quora spaces: %d actions", len(done))
+    return done
+
+
 # --------------------------------------------------------------------------- #
 # The posting job (background thread)
 # --------------------------------------------------------------------------- #
@@ -380,7 +642,6 @@ def _posting_job(approved_ids: list[str]) -> None:
     }
     _save_status(status)
 
-    reddit_done: list[tuple[str, str]] = []
     quora_done: list[tuple[str, str]] = []
     twitter_done: list[tuple[str, str]] = []
 
@@ -395,40 +656,8 @@ def _posting_job(approved_ids: list[str]) -> None:
                 _set_result(status, i, status="failed",
                             error="draft no longer in drafts.json — reload the dashboard")
 
-        reddit_drafts = [d for d in to_post if d["platform"] == "reddit"]
         quora_drafts = [d for d in to_post if d["platform"] == "quora"]
         twitter_drafts = [d for d in to_post if d["platform"] == "twitter"]
-
-        reddit = None
-        if reddit_drafts:
-            try:
-                reddit = common.get_reddit()
-            except Exception as e:  # noqa: BLE001
-                log.warning("Reddit auth failed: %s", e)
-
-        # --- Reddit, staggered 5-15 min between posts ---
-        for idx, draft in enumerate(reddit_drafts):
-            _set_result(status, draft["id"], status="posting")
-            log.info("Posting to Reddit: %s", draft["title"][:60])
-            try:
-                if reddit is None:
-                    raise RuntimeError("Reddit client unavailable (check credentials)")
-                url = _post_reddit(reddit, draft, config)
-                _set_result(status, draft["id"], status="success", url=url)
-                common.log_post("reddit", url, draft["draft"])
-                common.add_posted(draft["target_id"])
-                common.mark_draft_posted(draft["id"], url)
-                reddit_done.append((draft["title"], url))
-                log.info("Posted to Reddit: %s", url)
-            except Exception as e:  # noqa: BLE001
-                _set_result(status, draft["id"], status="failed", error=str(e))
-                log.warning("Reddit post failed (%s): %s", draft["id"], e)
-
-            if idx < len(reddit_drafts) - 1:
-                lo, hi = config["posting"]["reddit_delay_sec"]
-                delay = random.uniform(lo, hi)
-                log.info("Waiting %.0fs before next Reddit post...", delay)
-                time.sleep(delay)
 
         # --- Quora, staggered 3-5 min between posts ---
         for idx, draft in enumerate(quora_drafts):
@@ -505,23 +734,23 @@ def _posting_job(approved_ids: list[str]) -> None:
         status["finished_at"] = dt.datetime.now().isoformat(timespec="seconds")
         _save_status(status)
         try:
-            _send_confirmation(reddit_done, quora_done, twitter_done, config)
+            _send_confirmation(quora_done, twitter_done, config)
         except Exception as e:  # noqa: BLE001
             log.warning("Confirmation email failed: %s", e)
-        log.info("Posting job complete: %d reddit, %d quora, %d twitter.",
-                 len(reddit_done), len(quora_done), len(twitter_done))
+        log.info("Posting job complete: %d quora, %d twitter.",
+                 len(quora_done), len(twitter_done))
 
 
-def _send_confirmation(reddit_done, quora_done, twitter_done, config) -> None:
+def _send_confirmation(quora_done, twitter_done, config) -> None:
     date_str = dt.date.today().strftime("%d %b %Y")
     subject = config["email"]["confirmation_subject_template"].format(date=date_str)
     lines = [f"✅ Posted today — {date_str}", ""]
-    for label, items in (("REDDIT", reddit_done), ("QUORA", quora_done), ("TWITTER", twitter_done)):
+    for label, items in (("QUORA", quora_done), ("TWITTER", twitter_done)):
         lines.append(f"{label}: {len(items)} posted")
         for _, url in items:
             lines.append(f"  → {url}")
         lines.append("")
-    total = len(reddit_done) + len(quora_done) + len(twitter_done)
+    total = len(quora_done) + len(twitter_done)
     lines.append(f"📊 Total: {total} posts today")
     try:
         common.send_email(subject, "\n".join(lines))

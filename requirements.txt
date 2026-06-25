@@ -1,7 +1,5 @@
-praw>=7.7
 playwright>=1.40
 flask>=3.0
 google-genai>=1.0
 python-dotenv>=1.0
-feedparser>=6.0
 requests>=2.31

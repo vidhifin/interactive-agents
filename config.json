@@ -6,6 +6,16 @@
     "natural_mention_template": "I've been using Intrynsic (intrynsic.ai) lately — it's free early access and {benefit}"
   },
 
+  "tool_keywords": [
+    "best tool", "best platform", "best app", "best website", "best screener",
+    "stock screener", "screener", "which tool", "what tool", "which app",
+    "which website", "which platform", "platform to", "tool to", "app to",
+    "software", "analytics", "research tool", "research platform",
+    "how to analyze", "how to analyse", "how do i analyze", "bloomberg",
+    "terminal", "tools for", "apps for", "websites for", "where can i analyze",
+    "track stocks", "analyse stocks", "analyze stocks", "stock analysis"
+  ],
+
   "scout_time": "07:00",
   "timezone": "Asia/Kolkata",
 
@@ -26,87 +36,7 @@
   },
 
   "email": {
-    "digest_subject_template": "🎯 Intrynsic Engagement Digest — {date} | {n_reddit} Reddit + {n_quora} Quora drafts ready",
     "confirmation_subject_template": "✅ Posted today — {date}"
-  },
-
-  "reddit": {
-    "user_agent": "intrynsic-engagement-agent/1.0",
-    "no_karma_gate_subreddits": [
-      "IndiaInvestments",
-      "IndianStockMarket",
-      "DalalStreetTalks",
-      "personalfinanceindia"
-    ],
-    "all_subreddits": [
-      "IndiaInvestments",
-      "IndianStockMarket",
-      "DalalStreetTalks",
-      "personalfinanceindia",
-      "IndianStreetBets",
-      "ValueInvesting",
-      "stocks",
-      "SecurityAnalysis",
-      "investing",
-      "StockMarket"
-    ],
-    "min_score": 10,
-    "min_comments": 5,
-    "max_opportunities": 8,
-    "reply_word_range": [100, 200],
-    "priority_keywords": [
-      "stock screener",
-      "fundamental analysis",
-      "DCF",
-      "annual report",
-      "earnings call",
-      "NSE",
-      "BSE",
-      "intrinsic value",
-      "retail investor tools",
-      "how to analyze stocks",
-      "stock research",
-      "which tool",
-      "platform recommendation",
-      "Bloomberg alternative",
-      "stock analytics"
-    ],
-    "tool_recommendation_keywords": [
-      "which tool",
-      "what tool",
-      "platform recommendation",
-      "recommend a platform",
-      "recommend any tool",
-      "best tool",
-      "best platform",
-      "best website",
-      "best app",
-      "bloomberg alternative",
-      "bloomberg terminal",
-      "stock analytics",
-      "stock screener",
-      "retail investor tools",
-      "any good tools",
-      "what do you use",
-      "which website",
-      "which app",
-      "software for"
-    ],
-    "question_signals": [
-      "?",
-      "how do i",
-      "how to",
-      "what is",
-      "what are",
-      "which",
-      "can someone",
-      "anyone know",
-      "help me",
-      "eli5",
-      "explain",
-      "recommend",
-      "suggest"
-    ]
   },
 
   "quora": {
@@ -122,6 +52,21 @@
     "answer_word_range": [200, 400],
     "max_comments": 3,
     "max_questions": 1,
+    "followups_per_run": 2,
+    "spaces": [
+      "investments.quora.com",
+      "indiastockmarkettoday.quora.com",
+      "shareandstockmarket.quora.com",
+      "investingandfinance.quora.com",
+      "stockinvestingtrading.quora.com"
+    ],
+    "space_targets_per_run": 6,
+    "upvotes_per_space": 2,
+    "comments_per_space": 1,
+    "follow_spaces_per_run": 2,
+    "space_keywords": [
+      "stock", "market", "invest", "finance", "trading", "equity", "nifty", "share"
+    ],
     "comment_word_range": [20, 60],
     "search_keywords": [
       "how to analyze stocks in India",
@@ -162,6 +107,21 @@
     "tweets_per_run": 1,
     "likes_per_run": 3,
     "replies_per_run": 2,
+    "followups_per_run": 2,
+    "join_per_run": 1,
+    "community_keywords": [
+      "Indian stock market", "stock market investing", "Nifty",
+      "value investing India", "fundamental analysis stocks"
+    ],
+    "community_name_filters": [
+      "stock", "market", "invest", "finance", "nifty", "sensex",
+      "trading", "equity", "share"
+    ],
+    "communities": [],
+    "community_targets_per_run": 6,
+    "likes_per_community": 2,
+    "replies_per_community": 1,
+    "community_posts_per_run": 0,
     "headless": false,
     "char_limit": 280,
     "allow_intrynsic": false
@@ -170,28 +130,40 @@
   "front_page": {
     "enabled": true,
     "base_url": "https://front.page",
-    "comments_per_run": 2,
+    "clubs": [
+      "Fundamental Stock Scans",
+      "Mutual Fund Investing",
+      "Stock Bets",
+      "Trading Beginners Q and A",
+      "All About Indices",
+      "Commodity Central",
+      "Options Trading Ideas",
+      "IPO Buzz",
+      "Option Strategies and Selling",
+      "Intraday Stockbusters"
+    ],
+    "join_clubs_per_run": 2,
+    "topics": [
+      "fundamental analysis", "reading annual reports", "valuation basics",
+      "investing psychology and patience", "diversification", "dividends",
+      "index funds vs direct stocks", "small vs large caps", "IPOs",
+      "common beginner mistakes", "position sizing", "when to sell",
+      "tracking a portfolio", "sectors you're curious about", "investing routines",
+      "books and learning resources", "SIP vs lumpsum", "risk management"
+    ],
     "posts_per_run": 1,
-    "upvotes_per_run": 3,
+    "club_targets_per_run": 6,
+    "upvotes_per_club": 2,
+    "comments_per_club": 1,
     "headless": false,
     "allow_intrynsic": false
   },
 
   "posting": {
-    "reddit_delay_sec": [300, 900],
     "quora_delay_sec": [20, 45],
     "twitter_delay_sec": [30, 60],
     "quora_headless": false,
     "rate_limit_wait_sec": 60,
     "max_rate_limit_retries": 3
-  },
-
-  "warmup": {
-    "duration_days": 7,
-    "karma_target": 50,
-    "karma_subreddits": ["FreeKarma4U", "karma"],
-    "upvotes_per_day": [3, 5],
-    "warmup_comments_per_day": [1, 2],
-    "random_start_delay_min": [0, 45]
   }
 }

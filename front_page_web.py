@@ -103,28 +103,32 @@ def _save_card(action: str, title: str, text: str, url: str) -> None:
             "id": cid, "platform": "frontpage", "action": action, "topic": "front.page",
             "title": title[:120], "url": url, "context": ctx, "opp_score": 8,
             "mentions_intrynsic": "intrynsic" in (text or "").lower(),
-            "draft": text or title, "posted": True, "posted_url": url, "approved": True,
+            "draft": text or title, "posted": True, "posted_url": url,
+            "posted_at": common.now_str(), "approved": True,
         })
         common.save_drafts(drafts)
     except Exception as e:  # noqa: BLE001
         log.warning("front.page card save failed: %s", e)
 
 
-def _create_post(page, text: str) -> None:
+def _create_post(page, text: str, destination: str = "Post to Profile") -> None:
     ta = page.query_selector("textarea")
     if not ta:
         raise RuntimeError("front.page: no composer textarea found")
     _click(ta)
     time.sleep(2)
-    # The destination picker is a Radix combobox of <div role="option">. Select
-    # "Post to Profile" (this closes the picker and unlocks the editor).
+    # The destination picker is a Radix combobox of <div role="option">. Select the
+    # requested destination (a club name, or "Post to Profile"); fall back to profile.
     chose = page.evaluate(
-        "() => { const o=[...document.querySelectorAll('[role=option]')]"
-        ".find(x=>(x.innerText||'').trim().startsWith('Post to Profile'));"
-        " if (o) { o.click(); return true; } return false; }"
+        "(dest) => { const opts=[...document.querySelectorAll('[role=option]')];"
+        " let o=opts.find(x=>(x.innerText||'').trim().startsWith(dest));"
+        " if(!o) o=opts.find(x=>(x.innerText||'').trim().startsWith('Post to Profile'));"
+        " if (o) { o.click(); return (o.innerText||'').trim().slice(0,30); } return false; }",
+        destination,
     )
     if not chose:
         raise RuntimeError("front.page: destination option not found")
+    log.info("front.page: posting to '%s'", chose.split(chr(10))[0])
     time.sleep(2)
     box = None
     for t in page.query_selector_all("textarea"):
@@ -150,6 +154,73 @@ def _create_post(page, text: str) -> None:
     if not ok:
         raise RuntimeError("front.page: Submit stayed disabled (composer/picker)")
     time.sleep(4)
+
+
+def frontpage_join_clubs(config: dict) -> list[tuple[str, str]]:
+    """Auto-join (follow) the configured finance clubs that aren't joined yet.
+    Returns [(name, url)] of clubs newly joined this run."""
+    from playwright.sync_api import sync_playwright
+
+    fp = config.get("front_page", {})
+    n = fp.get("join_clubs_per_run", 0)
+    clubs = fp.get("clubs", [])
+    if not n or not clubs or not common.FRONTPAGE_STATE_PATH.exists():
+        return []
+    base = fp.get("base_url", "https://front.page").rstrip("/")
+    posted = common.load_posted()
+    joined: list[tuple[str, str]] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=fp.get("headless", False))
+        context = browser.new_context(
+            user_agent=BROWSER_UA, storage_state=str(common.FRONTPAGE_STATE_PATH))
+        page = context.new_page()
+        page.set_default_timeout(30000)
+        try:
+            page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
+            time.sleep(6)
+            if page.query_selector('button:has-text("Login")') is not None:
+                raise RuntimeError("Not logged into front.page.")
+            hrefs = page.evaluate(
+                "(names) => { const out={};"
+                " for (const a of document.querySelectorAll('a[href]')) {"
+                "  const t=(a.innerText||'').trim();"
+                "  for (const nm of names){ if (t===nm || t.startsWith(nm)) out[nm]=a.getAttribute('href'); } }"
+                " return out; }",
+                clubs,
+            )
+            count = 0
+            for name in clubs:
+                if count >= n:
+                    break
+                if ("fpclub:" + name) in posted:
+                    continue
+                href = hrefs.get(name)
+                if not href:
+                    common.add_posted("fpclub:" + name)
+                    continue
+                url = href if href.startswith("http") else base + href
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(5)
+                    clicked = page.evaluate(
+                        "() => { const el=[...document.querySelectorAll('button,a,span,div')]"
+                        ".find(e=>/^(Join|Follow)$/.test((e.innerText||'').trim()));"
+                        " if (el) { el.click(); return true; } return false; }"
+                    )
+                    common.add_posted("fpclub:" + name)
+                    common.note_recent("frontpage_club", name, keep=50)
+                    if clicked:
+                        joined.append((name, url))
+                        log.info("Joined front.page club: %s", name)
+                        count += 1
+                        time.sleep(random.uniform(4, 9))
+                except Exception as e:  # noqa: BLE001
+                    log.warning("front.page club join failed (%s): %s", name, e)
+        finally:
+            context.close()
+            browser.close()
+    log.info("front.page: joined %d new clubs", len(joined))
+    return joined
 
 
 def run_engagement(config: dict) -> list[tuple[str, str, str]]:
@@ -182,14 +253,42 @@ def run_engagement(config: dict) -> list[tuple[str, str, str]]:
             if page.query_selector('button:has-text("Login")') is not None:
                 raise RuntimeError("Not logged into front.page. Run `python front_page_login.py`.")
 
-            # 1) UPVOTES (engagement first; posting is the fragile bit, done last)
-            target_up = fp.get("upvotes_per_run", 0)
-            attempts = 0
-            up = 0
-            while up < target_up and attempts < target_up * 6:
-                attempts += 1
-                acted = False
+            # Engage WITHIN communities: visit up to N clubs; per-club quota of
+            # upvotes + comments in EACH (so engagement spreads across clubs).
+            clubs = list(dict.fromkeys((fp.get("clubs") or []) + common.recent("frontpage_club", 50)))
+            feeds = []
+            if clubs:
+                hrefs = page.evaluate(
+                    "(names) => { const out=[];"
+                    " for (const a of document.querySelectorAll('a[href]')) {"
+                    "  const t=(a.innerText||'').trim();"
+                    "  for (const n of names){ if (t===n || t.startsWith(n)) out.push(a.getAttribute('href')); } }"
+                    " return [...new Set(out)]; }",
+                    clubs,
+                )
+                feeds = [(h if h.startswith("http") else base + h) for h in hrefs]
+            random.shuffle(feeds)
+            if not feeds:
+                feeds = [base + "/"]
+            feeds = feeds[: fp.get("club_targets_per_run", 6)]
+
+            up_per = fp.get("upvotes_per_club", 0)
+            cm_per = fp.get("comments_per_club", 0)
+            for feed in feeds:
+                try:
+                    page.goto(feed, wait_until="domcontentloaded", timeout=40000)
+                    time.sleep(4)
+                    page.mouse.wheel(0, 1200)
+                    time.sleep(2)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("front.page club open failed (%s): %s", feed, e)
+                    continue
+
+                # upvotes in THIS club
+                u = 0
                 for vb in _buttons_labelled(page, "Vote"):
+                    if u >= up_per:
+                        break
                     txt = _post_text_of(vb)
                     key = "fpv:" + _h(txt)
                     if not txt or key in posted or key in local:
@@ -201,71 +300,71 @@ def run_engagement(config: dict) -> list[tuple[str, str, str]]:
                         continue
                     local.add(key)
                     common.add_posted(key)
-                    done.append(("fp_upvote", txt[:60], base + "/"))
-                    _save_card("upvote", txt, "", base + "/")
-                    up += 1
-                    acted = True
-                    time.sleep(random.uniform(3, 8))
-                    break
-                if not acted:
-                    break
+                    done.append(("fp_upvote", txt[:60], feed))
+                    _save_card("upvote", txt, "", feed)
+                    u += 1
+                    time.sleep(random.uniform(2, 5))
 
-            # 3) COMMENTS
-            target_c = fp.get("comments_per_run", 0)
-            attempts = 0
-            made = 0
-            while made < target_c and attempts < target_c * 6:
-                attempts += 1
-                acted = False
-                for cb in _buttons_labelled(page, "Comment"):
-                    txt = _post_text_of(cb)
-                    key = "fpc:" + _h(txt)
-                    if not txt or any(m in txt for m in _CHROME) or key in posted or key in local:
-                        continue
-                    try:
-                        draft = common.draft_frontpage_comment(txt, config)
-                        _click(cb)
-                        time.sleep(3)
-                        box = _comment_box(page)
-                        if not box:
-                            raise RuntimeError("comment box not found")
-                        _click(box)
-                        page.keyboard.type(draft, delay=4)
-                        time.sleep(1)
-                        sb = _comment_submit(box) or _find_submit(page)
-                        if not sb:
-                            raise RuntimeError("comment submit not found")
-                        _click(sb)
-                        time.sleep(3)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("front.page comment failed: %s", e)
-                        local.add(key)  # don't retry this same post this run
+                # comments in THIS club
+                c = 0
+                attempts = 0
+                while c < cm_per and attempts < cm_per * 6:
+                    attempts += 1
+                    acted = False
+                    for cb in _buttons_labelled(page, "Comment"):
+                        txt = _post_text_of(cb)
+                        key = "fpc:" + _h(txt)
+                        if not txt or any(m in txt for m in _CHROME) or key in posted or key in local:
+                            continue
+                        try:
+                            draft = common.draft_frontpage_comment(txt, config)
+                            _click(cb)
+                            time.sleep(3)
+                            box = _comment_box(page)
+                            if not box:
+                                raise RuntimeError("comment box not found")
+                            _click(box)
+                            page.keyboard.type(draft, delay=4)
+                            time.sleep(1)
+                            sb = _comment_submit(box) or _find_submit(page)
+                            if not sb:
+                                raise RuntimeError("comment submit not found")
+                            _click(sb)
+                            time.sleep(3)
+                        except Exception as e:  # noqa: BLE001
+                            log.warning("front.page comment failed: %s", e)
+                            local.add(key)
+                            acted = True
+                            break
+                        local.add(key)
+                        common.add_posted(key)
+                        common.log_post("frontpage-comment", feed, draft)
+                        done.append(("fp_comment", txt[:60], feed))
+                        _save_card("comment", txt, draft, feed)
+                        c += 1
                         acted = True
+                        time.sleep(random.uniform(3, 7))
                         break
-                    local.add(key)
-                    common.add_posted(key)
-                    common.log_post("frontpage-comment", base + "/", draft)
-                    done.append(("fp_comment", txt[:60], base + "/"))
-                    _save_card("comment", txt, draft, base + "/")
-                    made += 1
-                    acted = True
-                    time.sleep(random.uniform(4, 10))
-                    break
-                if not acted:
-                    break
+                    if not acted:
+                        break
 
             # 3) CREATE POST (last). Reload home first so the composer is the
             # first textarea again (commenting/upvoting mutates the page).
+            clubs = list(dict.fromkeys((fp.get("clubs") or []) + common.recent("frontpage_club", 50)))
             for _ in range(fp.get("posts_per_run", 0)):
                 try:
                     page.goto(base + "/", wait_until="domcontentloaded", timeout=40000)
                     time.sleep(5)
-                    text = common.draft_frontpage_post(config)
-                    _create_post(page, text)
+                    # Rotate destination: a joined club, or your profile.
+                    dest = random.choice(["Post to Profile"] + clubs) if clubs else "Post to Profile"
+                    club = None if dest == "Post to Profile" else dest
+                    text = common.draft_frontpage_post(config, club=club)
+                    _create_post(page, text, destination=dest)
                     common.log_post("frontpage", base + "/", text)
-                    done.append(("fp_post", text[:70], base + "/"))
+                    common.note_recent("frontpage_post", text)
+                    done.append(("fp_post", f"[{dest}] {text[:60]}", base + "/"))
                     _save_card("post", text, text, base + "/")
-                    log.info("front.page: posted an update")
+                    log.info("front.page: posted to '%s'", dest)
                 except Exception as e:  # noqa: BLE001
                     log.warning("front.page post failed (club-picker/composer): %s", e)
         finally:

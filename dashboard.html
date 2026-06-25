@@ -54,6 +54,7 @@
   .chip.score { background: #1d2a22; color: var(--green); }
   .chip.posted-chip { background: #1d2a22; color: var(--green); border-color: #2e6b4a; font-weight: 700; }
   .posted-label { color: var(--green); font-weight: 700; }
+  .posted-at { color: var(--muted); font-weight: 400; font-size: 12px; }
   .chip.action-chip { background: #22283a; color: #9db4ff; border-color: #33406a; font-weight: 700; }
   .title { font-weight: 700; margin: 4px 0; }
   .title a { color: var(--accent); text-decoration: none; }
@@ -93,8 +94,7 @@
 </header>
 
 <div class="tabs">
-  <div class="tab active" id="tab-reddit" onclick="switchTab('reddit')">Reddit</div>
-  <div class="tab" id="tab-quora" onclick="switchTab('quora')">Quora</div>
+  <div class="tab active" id="tab-quora" onclick="switchTab('quora')">Quora</div>
   <div class="tab" id="tab-twitter" onclick="switchTab('twitter')">Twitter</div>
   <div class="tab" id="tab-frontpage" onclick="switchTab('frontpage')">front.page</div>
 </div>
@@ -109,7 +109,7 @@
 
 <script>
 let DRAFTS = [];
-let TAB = "reddit";
+let TAB = "quora";
 let POLL = null;
 
 async function loadDrafts() {
@@ -121,7 +121,6 @@ async function loadDrafts() {
 
 function switchTab(t) {
   TAB = t;
-  document.getElementById("tab-reddit").classList.toggle("active", t === "reddit");
   document.getElementById("tab-quora").classList.toggle("active", t === "quora");
   document.getElementById("tab-twitter").classList.toggle("active", t === "twitter");
   document.getElementById("tab-frontpage").classList.toggle("active", t === "frontpage");
@@ -139,8 +138,7 @@ function render() {
 }
 
 function cardHTML(d) {
-  const where = d.platform === "reddit" ? ("r/" + d.subreddit)
-    : (d.platform === "twitter" ? ("X · " + (d.topic || "tweet")) : d.topic);
+  const where = d.platform === "twitter" ? ("X · " + (d.topic || "tweet")) : d.topic;
   const mention = d.mentions_intrynsic
     ? '<span class="chip mention">mentions Intrynsic</span>' : '';
   const postedChip = d.posted ? '<span class="chip posted-chip">✅ POSTED</span>' : '';
@@ -150,8 +148,9 @@ function cardHTML(d) {
     : escapeHTML(d.title);
   // Posted drafts: locked, no checkbox, labelled "Posted". Others: approve box.
   const viewLink = d.posted_url ? ` — <a href="${d.posted_url}" target="_blank" rel="noopener">view</a>` : '';
+  const postedAt = d.posted_at ? ` <span class="posted-at">· ${escapeHTML(d.posted_at)}</span>` : '';
   const foot = d.posted
-    ? `<span class="posted-label">✅ Posted${viewLink}</span>`
+    ? `<span class="posted-label">✅ Posted${postedAt}${viewLink}</span>`
     : `<label class="approve"><input type="checkbox" id="cb-${d.id}" ${d.approved ? "checked" : ""}/> Approve</label>`;
   return `
   <div class="card ${d.posted ? "posted" : ""}" id="card-${d.id}" data-id="${d.id}">
