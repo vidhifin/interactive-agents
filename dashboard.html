@@ -97,6 +97,7 @@
   <div class="tab active" id="tab-quora" onclick="switchTab('quora')">Quora</div>
   <div class="tab" id="tab-twitter" onclick="switchTab('twitter')">Twitter</div>
   <div class="tab" id="tab-frontpage" onclick="switchTab('frontpage')">front.page</div>
+  <div class="tab" id="tab-substack" onclick="switchTab('substack')">Substack</div>
 </div>
 
 <div class="tabbar">
@@ -124,6 +125,7 @@ function switchTab(t) {
   document.getElementById("tab-quora").classList.toggle("active", t === "quora");
   document.getElementById("tab-twitter").classList.toggle("active", t === "twitter");
   document.getElementById("tab-frontpage").classList.toggle("active", t === "frontpage");
+  document.getElementById("tab-substack").classList.toggle("active", t === "substack");
   render();
 }
 

@@ -159,9 +159,40 @@
     "allow_intrynsic": false
   },
 
+  "substack": {
+    "enabled": true,
+    "base_url": "https://substack.com",
+    "notes_url": "https://substack.com/notes",
+    "topics": [
+      "fundamental analysis", "reading annual reports", "valuation basics",
+      "investing psychology and patience", "diversification", "dividends",
+      "index funds vs direct stocks", "small vs large caps", "IPOs",
+      "common beginner mistakes", "position sizing", "when to sell",
+      "tracking a portfolio", "sectors you're curious about", "investing routines",
+      "books and learning resources", "SIP vs lumpsum", "risk management"
+    ],
+    "notes_per_run": 1,
+    "comments_per_run": 2,
+    "likes_per_run": 3,
+    "restacks_per_run": 1,
+    "feed_keywords": [
+      "Indian stock market", "value investing", "fundamental analysis",
+      "investing", "equity research", "stock market"
+    ],
+    "publications": [
+      "https://www.netnethunter.com",
+      "https://intrinsicinvesting.substack.com",
+      "https://thewealthletter.substack.com"
+    ],
+    "follow_per_run": 2,
+    "headless": false,
+    "allow_intrynsic": false
+  },
+
   "posting": {
     "quora_delay_sec": [20, 45],
     "twitter_delay_sec": [30, 60],
+    "substack_delay_sec": [25, 55],
     "quora_headless": false,
     "rate_limit_wait_sec": 60,
     "max_rate_limit_retries": 3

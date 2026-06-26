@@ -25,6 +25,7 @@ import scout
 import poster
 import twitter_web
 import front_page_web
+import substack_web
 import notifications
 from common import log
 
@@ -72,7 +73,12 @@ def _summary_email(done: list[tuple[str, str, str]], config: dict) -> None:
                        ("LIKED ON X", "like"),
                        ("FRONT.PAGE POSTS", "fp_post"),
                        ("FRONT.PAGE COMMENTS", "fp_comment"),
-                       ("UPVOTED ON FRONT.PAGE", "fp_upvote")):
+                       ("UPVOTED ON FRONT.PAGE", "fp_upvote"),
+                       ("SUBSTACK PUBLICATIONS FOLLOWED", "sb_follow"),
+                       ("SUBSTACK NOTES", "sb_note"),
+                       ("SUBSTACK REPLIES", "sb_comment"),
+                       ("RESTACKED ON SUBSTACK", "sb_restack"),
+                       ("LIKED ON SUBSTACK", "sb_like")):
         items = buckets.get(key, [])
         lines.append(f"{label}: {len(items)}")
         for title, url in items:
@@ -185,6 +191,19 @@ def main() -> None:
         done.extend(front_page_web.run_engagement(config))
     except Exception as e:  # noqa: BLE001
         log.warning("front.page engagement failed: %s", e)
+
+    # 2d0) Substack: follow relevant publications (capped).
+    try:
+        for name, url in substack_web.follow_publications(config):
+            done.append(("sb_follow", name, url))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Substack follow failed: %s", e)
+
+    # 2d) Substack: post a note + reply + like + restack.
+    try:
+        done.extend(substack_web.run_engagement(config))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Substack engagement failed: %s", e)
 
     # 3) ONE summary email with all the links (what WE did today).
     _summary_email(done, config)

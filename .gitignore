@@ -1,7 +1,9 @@
 .env
 quora_state.json
 twitter_profile/
+substack_profile/
 frontpage_state.json
+substack_state.json
 drafts.json
 recent.json
 post_status.json

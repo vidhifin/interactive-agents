@@ -1,8 +1,8 @@
 # Intrynsic — Community Engagement Agent
 
 A fully-automatic agent that engages in Indian investing communities on **Quora**,
-**X/Twitter**, and **front.page** — drafting authentic, helpful content in a
-consistent persona and posting it daily. It mentions
+**X/Twitter**, **front.page**, and **Substack** — drafting authentic, helpful
+content in a consistent persona and posting it daily. It mentions
 [Intrynsic](https://intrynsic.ai) only where someone is genuinely asking about a
 tool/screener/platform — never as spam.
 
@@ -21,7 +21,8 @@ tool/screener/platform — never as spam.
 | `poster.py` | Flask dashboard on `localhost:5050` + Quora posting + Quora-Space engagement |
 | `twitter_web.py` | X/Twitter automation: tweet, reply, like, join + engage Communities, follow-ups |
 | `front_page_web.py` | front.page automation: post, comment, upvote, join Clubs |
-| `dashboard.html` | Quora / Twitter / front.page dashboard UI (posted cards show date + view link) |
+| `substack_web.py` | Substack automation: post Notes, reply, like + restack, follow publications |
+| `dashboard.html` | Quora / Twitter / front.page / Substack dashboard UI (posted cards show date + view link) |
 | `common.py` | Shared helpers: config/env, persona, LLM drafting (Groq/Gemini), email, logging, ledger |
 | `*_login.py` | One-time manual logins that save each platform's browser session |
 | `config.json` | All knobs: platforms, keywords, per-community quotas, timings |
@@ -73,8 +74,12 @@ Groq API key. **Keep `.env` local — never commit it.**
 python quora_login.py        # saves quora_state.json
 python twitter_login.py      # logs into a persistent real-Chrome profile
 python front_page_login.py   # saves frontpage_state.json
+python substack_login.py     # tries auto sign-in, then saves substack_state.json
 ```
 Each opens a browser; log in fully (solve any CAPTCHA), then return and press Enter.
+For Substack, add `SUBSTACK_EMAIL` + `SUBSTACK_PASSWORD` to `.env` first — the login
+script attempts an automatic sign-in, but if your account uses a magic link or
+Google, just finish logging in by hand in the open window before pressing Enter.
 
 ---
 

@@ -33,6 +33,10 @@ QUORA_STATE_PATH = ROOT / "quora_state.json"
 # browser) instead of a saved storage_state, so logins aren't flagged.
 TWITTER_PROFILE_DIR = ROOT / "twitter_profile"
 FRONTPAGE_STATE_PATH = ROOT / "frontpage_state.json"
+# Substack uses a persistent REAL-Chrome profile (like X) — bundled Chromium trips
+# Substack's bot-defense and the login CAPTCHA won't render. Log in once; it sticks.
+SUBSTACK_PROFILE_DIR = ROOT / "substack_profile"
+SUBSTACK_STATE_PATH = ROOT / "substack_state.json"  # legacy; no longer used
 POST_STATUS_PATH = ROOT / "post_status.json"
 LOGS_DIR = ROOT / "logs"
 ERRORS_LOG = ROOT / "errors.log"
@@ -586,3 +590,80 @@ Output ONLY the reply text."""
     if len(t) > limit:
         t = t[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
     return t
+
+
+# --------------------------------------------------------------------------- #
+# Substack (Notes) drafting
+# --------------------------------------------------------------------------- #
+_SUBSTACK_ANGLES = [
+    "ask the community ONE genuine question you're actually unsure about",
+    "share a small, humble lesson or mistake from your own investing, briefly",
+    "explain ONE simple concept in plain words, like to a beginner",
+    "post a short open-ended thought you're mulling over, with no firm conclusion",
+    "ask what others are currently reading on Substack about investing",
+    "raise a small doubt about a sector or a type of stock, kept general",
+    "react to a common debate (SIP vs lumpsum, growth vs value, active vs passive) "
+    "WITHOUT declaring a winner",
+    "share a tiny habit or routine that works for you, softly",
+    "ask for newsletter / book / podcast recommendations",
+    "admit something you find confusing and ask how others handle it",
+]
+
+
+def draft_substack_note(config: dict) -> str:
+    """Original Substack Note — rotates an angle + avoids repeating recents."""
+    import random as _r
+
+    sb = config.get("substack", {})
+    mention_line = (
+        "You MAY weave in a natural Intrynsic mention with the link https://intrynsic.ai/ "
+        "only if it truly fits; otherwise skip it."
+        if sb.get("allow_intrynsic", False)
+        else "Do NOT mention Intrynsic."
+    )
+    angle = _r.choice(_SUBSTACK_ANGLES)
+    topics = sb.get("topics") or ["the markets generally"]
+    topic = _r.choice(topics)
+    recents = recent("substack_note", 6)
+    avoid = ""
+    if recents:
+        avoid = ("Here are your RECENT notes — do NOT repeat their topic, the same "
+                 "stocks, or the same opening line; sound clearly different:\n- "
+                 + "\n- ".join(r[:130] for r in recents) + "\n")
+
+    prompt = f"""\
+Write ONE short Substack Note for an investing audience, as an ordinary early-30s
+Indian retail investor — like a real person typing off the cuff.
+
+This specific note: {angle}. Loosely around {topic}.
+
+Make it feel human and varied:
+- Do NOT open with "I've been tracking/watching..." or a recital of stock tickers.
+- You usually do NOT need to name specific stocks — often better not to.
+- Casual, a little informal. Length 1 to 3 short sentences (vary it).
+- No "best", no predictions, no current/real market prices or index levels.
+{mention_line}
+
+{avoid}Output ONLY the note text."""
+    return _complete(prompt, config).strip().strip('"')
+
+
+def draft_substack_comment(note_text: str, config: dict) -> str:
+    """Short, genuine reply to someone else's Substack Note."""
+    sb = config.get("substack", {})
+    mention_line = (
+        "You MAY add a natural Intrynsic mention with the link only if it truly fits; "
+        "otherwise skip it."
+        if sb.get("allow_intrynsic", False)
+        else "Do NOT mention Intrynsic."
+    )
+    prompt = f"""\
+Write a SHORT reply (1-3 sentences) to this Substack Note, as a fellow early-30s
+Indian retail investor. Engage genuinely — agree and add a point, share a quick
+experience, or ask a thoughtful question. Conversational, no "Great note" filler.
+{mention_line}
+
+THE NOTE: {(note_text or '')[:600]}
+
+Output ONLY the reply text."""
+    return _complete(prompt, config).strip().strip('"')
