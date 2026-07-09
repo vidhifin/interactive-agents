@@ -1,4 +1,5 @@
 .env
+.env_*
 quora_state.json
 twitter_profile/
 substack_profile/

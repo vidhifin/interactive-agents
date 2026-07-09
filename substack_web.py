@@ -172,16 +172,35 @@ def _action_buttons(page, *needles: str):
 
 
 def _open_composer(page, notes_url: str):
-    """Open the Note composer and return its editable element."""
+    """Open the Note composer and return its editable element.
+
+    The trigger is a button labelled "New post" (its visible text is the
+    placeholder "What's on your mind?"). We must click that exact button — a
+    loose innerText search for the placeholder matches nested nav containers
+    too, and clicking one of those navigates away from the feed. The editor
+    that opens is a focused tiptap/ProseMirror contenteditable div.
+    """
     page.goto(notes_url, wait_until="domcontentloaded", timeout=40000)
     time.sleep(5)
-    # Click any "Write a note" trigger to focus the editor.
-    page.evaluate(
-        "() => { const el=[...document.querySelectorAll('button,a,div,span,textarea')]"
-        ".find(e=>/write a note|start a note|write something/i"
-        ".test((e.innerText||e.getAttribute?.('placeholder')||'').trim())); if (el) el.click(); }"
-    )
-    time.sleep(2)
+    trigger = page.query_selector('button[aria-label="New post"]')
+    if not trigger:
+        # Fallback: a button whose OWN text is the placeholder (not a container).
+        trigger = page.evaluate_handle(
+            "() => [...document.querySelectorAll('button')]"
+            ".find(b => /^what.?s on your mind\\??$/i.test((b.innerText||'').trim()))"
+        ).as_element()
+    if trigger:
+        _click(trigger)
+        time.sleep(3)
+    # Prefer the just-focused composer; fall back to any visible editable.
+    for sel in (".tiptap.ProseMirror.ProseMirror-focused",
+                ".tiptap.ProseMirror[contenteditable='true']"):
+        ed = page.query_selector(sel)
+        try:
+            if ed and ed.is_visible():
+                return ed
+        except Exception:  # noqa: BLE001
+            pass
     for ed in page.query_selector_all('[contenteditable="true"], textarea'):
         try:
             if ed.is_visible():
@@ -205,11 +224,18 @@ def post_note(page, text: str, notes_url: str) -> None:
         ed.evaluate("(el, val) => { el.focus();"
                     " document.execCommand('insertText', false, val); }", text)
     time.sleep(1)
-    ok = page.evaluate(
-        "() => { const b=[...document.querySelectorAll('button')]"
-        ".find(x=>/^(post|publish|send)$/i.test((x.innerText||'').trim()) && !x.disabled);"
-        " if (b) { b.click(); return true; } return false; }"
-    )
+    # The Post button stays disabled until the editor registers the text, so
+    # poll for a few seconds rather than checking once.
+    ok = False
+    for _ in range(10):
+        ok = page.evaluate(
+            "() => { const b=[...document.querySelectorAll('button')]"
+            ".find(x=>/^(post|publish|send)$/i.test((x.innerText||'').trim()) && !x.disabled);"
+            " if (b) { b.click(); return true; } return false; }"
+        )
+        if ok:
+            break
+        time.sleep(1)
     if not ok:
         raise RuntimeError("Substack: Post button stayed disabled/not found")
     time.sleep(4)
